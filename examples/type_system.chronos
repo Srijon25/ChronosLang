@@ -1,0 +1,9 @@
+function add(a: int, b: int) -> int:
+    return a + b
+
+function auto_add(a, b):   # inferred
+    return a + b
+
+print(add(5, 6))           # ok
+print(auto_add("hi", " world"))   # ok
+print(auto_add(5, "x"))    # should raise TypeError
