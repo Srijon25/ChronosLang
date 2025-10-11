@@ -1,0 +1,8 @@
+function worker(ch):
+    data = <-ch
+    ch <- data * 2
+
+ch = make(chan int)
+go worker(ch)
+ch <- 42
+print(<-ch)

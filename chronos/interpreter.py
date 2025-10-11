@@ -2,6 +2,8 @@ from lark import Lark, Tree, Token
 import sys
 import ast
 import argparse
+import threading
+import queue
 
 chronos_grammar = r"""
 start: stmt*
@@ -10,6 +12,7 @@ start: stmt*
      | func_def
      | return_stmt
      | expr_stmt
+     | go_stmt
 
 // function with optional type annotations
 func_def: "function" NAME "(" params? ")" return_type? ":" block
@@ -22,6 +25,8 @@ block: "{" stmt* "}"
 var_assign: NAME "=" expr
 return_stmt: "return" expr
 expr_stmt: expr
+
+go_stmt: "go" expr
 
 ?expr: expr "+" term   -> add
      | expr "-" term   -> sub
@@ -36,9 +41,16 @@ expr_stmt: expr
        | func_call
        | NAME          -> var
        | "(" expr ")"
+       | send
+       | recv
+       | type_expr
 
 func_call: NAME "(" args? ")"
 args: expr ("," expr)*
+
+send: NAME "<-" expr          // ch <- expr
+recv: "<-" NAME               // <- ch
+type_expr: "chan" TYPE       // chan int, chan float, etc.
 
 %import common.CNAME -> NAME
 %import common.SIGNED_NUMBER -> NUMBER
@@ -99,6 +111,93 @@ def preprocess_indent(src: str) -> str:
         indent_stack.pop()
 
     return "\n".join(out_lines)
+
+
+class Channel:
+    """
+    Unbuffered rendezvous channel.
+    - send(x) blocks until a receiver takes the value.
+    - recv() blocks until a sender provides a value.
+    This is a minimal single-slot rendezvous implementation (one waiting sender
+    or one waiting receiver at a time). It's intentionally simple and deterministic
+    for Week 3 demos.
+    """
+
+    def __init__(self, elem_type=None, buffer=0):
+        # elem_type: optional string like 'int' or None (kept for typing info)
+        # buffer ignored: this Channel is unbuffered (rendezvous).
+        self.elem_type = elem_type
+
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+
+        # state for a waiting sender
+        self._has_sender = False
+        self._sender_value = None
+
+        # state for a waiting receiver
+        self._has_receiver = False
+        self._receiver_value = None
+
+        # helper flag so sender can wait for acknowledgement that receiver consumed
+        self._sender_ack = False
+
+    def send(self, value):
+        with self._cond:
+            # If a receiver is already waiting, transfer value and wake it.
+            if self._has_receiver:
+                # place value where receiver will read it
+                self._receiver_value = value
+                # mark receiver no longer waiting to accept; receiver will consume
+                self._has_receiver = False
+                # notify receiver
+                self._cond.notify_all()
+
+                # wait until receiver acknowledges that it consumed the value
+                while not self._sender_ack:
+                    self._cond.wait()
+                # reset ack for future transfers
+                self._sender_ack = False
+                return
+
+            # No receiver waiting -> become the sender and wait for a receiver
+            # (only one waiting sender supported in this simple implementation)
+            self._has_sender = True
+            self._sender_value = value
+            # wait until a receiver pairs with us and takes the value
+            while self._has_sender:
+                self._cond.wait()
+            # at this point receiver has consumed the value and returned,
+            # so send() can complete.
+            return
+
+    def recv(self):
+        with self._cond:
+            # If a sender is already waiting, take its value immediately
+            if self._has_sender:
+                val = self._sender_value
+                # mark sender as consumed
+                self._has_sender = False
+                self._sender_value = None
+                # notify sender so it can continue
+                self._cond.notify_all()
+                return val
+
+            # No sender waiting -> become a receiver and wait for a sender to provide value
+            self._has_receiver = True
+            # wait until a sender transfers a value into _receiver_value
+            while self._has_receiver and self._receiver_value is None:
+                self._cond.wait()
+
+            # receiver_value was set by send()
+            val = self._receiver_value
+            self._receiver_value = None
+            # acknowledge to sender that we consumed the value (unblocks send())
+            self._sender_ack = True
+            # notify sender that ack was set
+            self._cond.notify_all()
+            return val
+
 
 
 
@@ -195,36 +294,24 @@ class ReturnException(Exception):
 
 
 
-# TypeChecker (static)
-
+# TypeChecker (static) - extended for go/send/recv/type_expr
 class TypeChecker:
-    """
-    Conservative static type checker:
-    - collects function signatures
-    - infers 'auto' parameter types from call-sites
-    - infers return type from function returns if possible
-    - permissive arithmetic handling (auto/unknown -> auto)
-    """
-
     def __init__(self, tree: Tree, infer: bool = False):
         self.tree = tree
         self.infer = infer
-        # functions: ...
         self.functions = {}
-        self.builtins = {"print": {"param_types": ["auto"], "return_type": "void"}}
+        self.builtins = {"print": {"param_types": ["auto"], "return_type": "void"},
+                         "make": {"param_types": ["auto"], "return_type": "chan"}}
 
     def check(self):
-        # collect all function signatures first
         for node in self.tree.children:
             if isinstance(node, Tree) and node.data == "func_def":
                 self._collect_signature(node)
 
-        # process top-level statements (so top-level calls can help infer)
         for node in self.tree.children:
             if not (isinstance(node, Tree) and node.data == "func_def"):
                 self._check_stmt(node, {}, [])
 
-        # ensure remaining functions are checked
         for name, sig in list(self.functions.items()):
             if not sig.get("checked"):
                 self._check_function(sig)
@@ -252,7 +339,6 @@ class TypeChecker:
             elif isinstance(c, Tree) and c.data == "block":
                 block_node = c
 
-        # normalize param_types length
         while len(param_types) < len(params):
             param_types.append("auto")
 
@@ -270,7 +356,6 @@ class TypeChecker:
     def _check_function(self, sig):
         if sig.get("checked"):
             return
-
         local_types = {}
         for i, pname in enumerate(sig["params"]):
             ptype = sig["param_types"][i] if i < len(sig["param_types"]) else "auto"
@@ -332,6 +417,10 @@ class TypeChecker:
         if stmt.data == "expr_stmt":
             self._expr_type(stmt.children[0], local_types)
             return
+        if stmt.data == "go_stmt":
+            # type-check expression launched in background
+            self._expr_type(stmt.children[0], local_types)
+            return
 
     def _expr_type(self, node, local_types):
         # Token leaf
@@ -361,22 +450,14 @@ class TypeChecker:
         if node.data in ('add', 'sub', 'mul', 'div'):
             left = self._expr_type(node.children[0], local_types)
             right = self._expr_type(node.children[1], local_types)
-
-            # both numeric
             if left in {"int", "float"} and right in {"int", "float"}:
                 return "float" if ("float" in (left, right)) else "int"
-
-            # if either is auto/unknown -> defer, return auto
             if left == "auto" or right == "auto" or left == "unknown" or right == "unknown":
-                # prefer string for add if either side string
                 if node.data == 'add' and (left == "string" or right == "string"):
                     return "string"
                 return "auto"
-
-            # add string concat
             if node.data == 'add' and left == "string" and right == "string":
                 return "string"
-
             raise TypeError(f"Type error in arithmetic: {left} {node.data} {right}")
 
         if node.data == 'func_call':
@@ -432,22 +513,38 @@ class TypeChecker:
                 return fsig["inferred_return"]
             return "auto"
 
+        if node.data == 'type_expr':
+            names = extract_name_tokens(node)
+            if len(names) >= 2 and names[0] == 'chan':
+                return f"chan<{names[1]}>"
+            return "chan"
+
+        if node.data == 'send':
+            # send: NAME "<-" expr
+            # ensure channel exists and types roughly match (best-effort)
+            ch_name = get_name(node.children[0])
+            val_type = self._expr_type(node.children[1], local_types)
+            return "void"
+
+        if node.data == 'recv':
+            # recv: "<-" NAME
+            ch_name = get_name(node.children[0])
+            return "unknown"
+
         if node.data == 'expr':
             return self._expr_type(node.children[0], local_types)
 
         raise NotImplementedError(f"TypeChecker: unsupported node {node.data}")
 
 
-
-# Interpreter (runtime)
-
+# Interpreter (runtime), extended with concurrency primitives
 class Interpreter:
     def __init__(self):
         self.parser = Lark(chronos_grammar, parser="lalr", propagate_positions=True)
         self.global_env = Environment()
         # builtin: print
         self.global_env.set("print", lambda *args: print(*args))
-        self.type_info = {}  # filled after typecheck
+        self.type_info = {}
 
     def run(self, src: str, skip_typecheck: bool = False, permissive: bool = False, infer: bool = False):
 
@@ -457,15 +554,12 @@ class Interpreter:
         if not skip_typecheck:
             checker = TypeChecker(tree, infer=infer)
             try:
-              checker.check()
-        # Only sync inferred signatures into runtime when inference was enabled
-              if infer:
-               self.type_info = checker.functions
-
+                checker.check()
+                if infer:
+                    self.type_info = checker.functions
             except TypeError as e:
                 if permissive:
                     print(f"TypeWarning (static): {e}  -- continuing execution (permissive mode).")
-                    # try to salvage any inference that happened
                     try:
                         self.type_info = checker.functions
                     except Exception:
@@ -518,21 +612,52 @@ class Interpreter:
             if fname in self.type_info:
                 sig = self.type_info[fname]
                 if sig.get("param_types"):
-                    # ensure length equals params
-                    param_types = list(sig["param_types"])
-                # prefer declared return or inferred return
+                    param_types = list(sig["param_types"])[:len(params)]
                 if sig.get("return_type_decl") and sig["return_type_decl"] != "auto":
                     return_type = sig["return_type_decl"]
                 elif sig.get("inferred_return"):
                     return_type = sig["inferred_return"]
 
-            # normalize length
             while len(param_types) < len(params):
                 param_types.append("auto")
 
             func = Function(fname, params, param_types, return_type, block_node, env)
             env.set(fname, func)
             return None
+
+        if node.data == "go_stmt":
+            expr = node.children[0]
+            # If expr is a function call, prepare args but don't execute here
+            if isinstance(expr, Tree) and expr.data == 'func_call':
+                name_tok = expr.children[0]
+                args_nodes = expr.children[1] if len(expr.children) > 1 else None
+                args_vals = []
+                if args_nodes:
+                    for e in args_nodes.children:
+                        args_vals.append(self.eval_expr(e, env, permissive))
+                func_val = env.get(get_name(name_tok))
+                if not isinstance(func_val, Function):
+                    raise TypeError(f"'go' applied to non-function '{get_name(name_tok)}'")
+
+                def target(fv=func_val, av=args_vals):
+                    try:
+                        self.call_function(fv, av, permissive)
+                    except Exception as ex:
+                        print("[background thread error]", ex)
+
+                t = threading.Thread(target=target, daemon=True)
+                t.start()
+                return None
+            else:
+                # generic expression in new thread
+                def target_expr(e=expr, env_local=env):
+                    try:
+                        self.eval_expr(e, env_local, permissive)
+                    except Exception as ex:
+                        print("[background thread error]", ex)
+                t = threading.Thread(target=target_expr, daemon=True)
+                t.start()
+                return None
 
         if node.data == "return_stmt":
             val = self.eval_expr(node.children[0], env, permissive)
@@ -636,17 +761,47 @@ class Interpreter:
                 for expr in args_node.children:
                     args.append(self.eval_expr(expr, env, permissive))
             fname = get_name(name_tok)
-            # builtin
+            # special-case 'make' builtin expecting a type_expr sentinel
+            if fname == 'make':
+                if args and isinstance(args[0], tuple) and args[0][0] == 'chan':
+                    # args[0] is ('chan', 'int') or ('chan', None)
+                    elem = args[0][1]
+                    return Channel(elem_type=elem)
+                return Channel()
+
             try:
                 func_val = env.get(fname)
             except NameError:
                 raise NameError(f"Function '{fname}' is not defined")
-            # direct python builtin (e.g., print)
             if callable(func_val) and not isinstance(func_val, Function):
                 return func_val(*args)
             if isinstance(func_val, Function):
                 return self.call_function(func_val, args, permissive)
             raise TypeError(f"'{fname}' is not callable")
+
+        if node.data == 'type_expr':
+            names = extract_name_tokens(node)
+            if len(names) >= 2 and names[0] == 'chan':
+                return ('chan', names[1])
+            return ('chan', None)
+
+        if node.data == 'send':
+            # send: NAME "<-" expr
+            name_tok = node.children[0]
+            val = self.eval_expr(node.children[1], env, permissive)
+            ch = env.get(get_name(name_tok))
+            if not isinstance(ch, Channel):
+                raise TypeError(f"'{get_name(name_tok)}' is not a channel")
+            ch.send(val)
+            return None
+
+        if node.data == 'recv':
+            # recv: "<-" NAME
+            name_tok = node.children[0]
+            ch = env.get(get_name(name_tok))
+            if not isinstance(ch, Channel):
+                raise TypeError(f"'{get_name(name_tok)}' is not a channel")
+            return ch.recv()
 
         if node.data == 'expr':
             return self.eval_expr(node.children[0], env, permissive)
@@ -656,7 +811,6 @@ class Interpreter:
     def call_function(self, func: Function, args, permissive: bool):
         # runtime argument type checks (respect permissive)
         for i, expected in enumerate(func.param_types):
-            # actual value
             actual_val = args[i] if i < len(args) else None
             if actual_val is None:
                 actual_type = "unknown"
@@ -666,6 +820,8 @@ class Interpreter:
                 actual_type = "float"
             elif isinstance(actual_val, str):
                 actual_type = "string"
+            elif isinstance(actual_val, Channel):
+                actual_type = f"chan<{actual_val.elem_type}>" if actual_val.elem_type else "chan"
             else:
                 actual_type = "unknown"
 
