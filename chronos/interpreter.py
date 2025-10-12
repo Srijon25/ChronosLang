@@ -13,6 +13,8 @@ start: stmt*
      | return_stmt
      | expr_stmt
      | go_stmt
+     | test_def
+     | assert_stmt
 
 // function with optional type annotations
 func_def: "function" NAME "(" params? ")" return_type? ":" block
@@ -28,9 +30,22 @@ expr_stmt: expr
 
 go_stmt: "go" expr
 
-?expr: expr "+" term   -> add
-     | expr "-" term   -> sub
-     | term
+test_def: "test" STRING ":" block
+assert_stmt: "assert" expr
+
+?expr: comp
+
+?comp: comp "==" sum   -> eq
+     | comp "!=" sum   -> ne
+     | comp "<" sum    -> lt
+     | comp "<=" sum   -> le
+     | comp ">" sum    -> gt
+     | comp ">=" sum   -> ge
+     | sum
+
+?sum: sum "+" term  -> add
+    | sum "-" term  -> sub
+    | term
 
 ?term: term "*" factor -> mul
      | term "/" factor -> div
@@ -50,6 +65,7 @@ args: expr ("," expr)*
 
 send: NAME "<-" expr          // ch <- expr
 recv: "<-" NAME               // <- ch
+
 type_expr: "chan" TYPE       // chan int, chan float, etc.
 
 %import common.CNAME -> NAME
@@ -70,7 +86,7 @@ TYPE: "int" | "float" | "string" | "auto"
 def preprocess_indent(src: str) -> str:
     """
     Convert Python-style indentation to explicit { ... } blocks.
-    Robust against inline comments and blank lines.
+    Minimal, intended for small demo programs.
     """
     lines = src.splitlines()
     out_lines = []
@@ -78,7 +94,7 @@ def preprocess_indent(src: str) -> str:
 
     for i, raw in enumerate(lines):
         if raw.strip() == "":
-            # skip empty lines (but do not produce '}'; keep neat)
+            # skip empty lines (but keep them as separators)
             continue
         stripped = raw.lstrip(" \t")
         indent = len(raw) - len(stripped)
@@ -113,104 +129,74 @@ def preprocess_indent(src: str) -> str:
     return "\n".join(out_lines)
 
 
+
+# Channel (unbuffered rendezvous)
+
 class Channel:
     """
-    Unbuffered rendezvous channel.
+    Simple unbuffered rendezvous channel:
     - send(x) blocks until a receiver takes the value.
     - recv() blocks until a sender provides a value.
-    This is a minimal single-slot rendezvous implementation (one waiting sender
-    or one waiting receiver at a time). It's intentionally simple and deterministic
-    for Week 3 demos.
+    This single-slot design is deterministic for demos.
     """
-
     def __init__(self, elem_type=None, buffer=0):
-        # elem_type: optional string like 'int' or None (kept for typing info)
-        # buffer ignored: this Channel is unbuffered (rendezvous).
         self.elem_type = elem_type
-
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
-
-        # state for a waiting sender
         self._has_sender = False
         self._sender_value = None
-
-        # state for a waiting receiver
         self._has_receiver = False
         self._receiver_value = None
-
-        # helper flag so sender can wait for acknowledgement that receiver consumed
         self._sender_ack = False
 
     def send(self, value):
         with self._cond:
-            # If a receiver is already waiting, transfer value and wake it.
+            # if receiver waiting, transfer immediately
             if self._has_receiver:
-                # place value where receiver will read it
                 self._receiver_value = value
-                # mark receiver no longer waiting to accept; receiver will consume
                 self._has_receiver = False
-                # notify receiver
                 self._cond.notify_all()
-
-                # wait until receiver acknowledges that it consumed the value
+                # wait for receiver to ack consumption
                 while not self._sender_ack:
                     self._cond.wait()
-                # reset ack for future transfers
                 self._sender_ack = False
                 return
-
-            # No receiver waiting -> become the sender and wait for a receiver
-            # (only one waiting sender supported in this simple implementation)
+            # no receiver: become waiting sender
             self._has_sender = True
             self._sender_value = value
-            # wait until a receiver pairs with us and takes the value
             while self._has_sender:
                 self._cond.wait()
-            # at this point receiver has consumed the value and returned,
-            # so send() can complete.
             return
 
     def recv(self):
         with self._cond:
-            # If a sender is already waiting, take its value immediately
+            # if sender waiting, take it immediately
             if self._has_sender:
                 val = self._sender_value
-                # mark sender as consumed
                 self._has_sender = False
                 self._sender_value = None
-                # notify sender so it can continue
                 self._cond.notify_all()
                 return val
-
-            # No sender waiting -> become a receiver and wait for a sender to provide value
+            # no sender: become waiting receiver
             self._has_receiver = True
-            # wait until a sender transfers a value into _receiver_value
             while self._has_receiver and self._receiver_value is None:
                 self._cond.wait()
-
-            # receiver_value was set by send()
             val = self._receiver_value
             self._receiver_value = None
-            # acknowledge to sender that we consumed the value (unblocks send())
+            # ack to sender
             self._sender_ack = True
-            # notify sender that ack was set
             self._cond.notify_all()
             return val
 
 
 
-
-# Helpers for AST tokens/names
+# Helpers (AST tokens/names)
 
 def get_name(node):
-    """
-    Return the string for a NAME/TYPE whether node is Token or Tree wrapper.
-    """
+    """Return NAME/TYPE token string from Token or Tree wrapper."""
     if isinstance(node, Token):
         return node.value
     if isinstance(node, Tree):
-        # search for NAME/TYPE token among children
         for c in node.children:
             if isinstance(c, Token) and c.type in ("NAME", "TYPE"):
                 return c.value
@@ -222,9 +208,7 @@ def get_name(node):
 
 
 def extract_name_tokens(node):
-    """
-    Return a list of NAME/TYPE token string values found in node (recursively), in order.
-    """
+    """Return list of NAME/TYPE token string values found in node."""
     out = []
     if isinstance(node, Token):
         if node.type in ("NAME", "TYPE"):
@@ -237,7 +221,6 @@ def extract_name_tokens(node):
 
 
 def unify_numeric(t1, t2):
-    """Return unified numeric type or None if incompatible."""
     numeric = {"int", "float"}
     if t1 in numeric and t2 in numeric:
         if t1 == "float" or t2 == "float":
@@ -247,12 +230,13 @@ def unify_numeric(t1, t2):
 
 
 def is_compatible(expected, actual):
-    """Return True if actual can be used where expected is required."""
     if expected == "auto" or expected is None:
         return True
     if expected == actual:
         return True
     if expected == "float" and actual == "int":
+        return True
+    if isinstance(expected, str) and expected.startswith("chan") and isinstance(actual, str) and actual.startswith("chan"):
         return True
     return False
 
@@ -278,13 +262,11 @@ class Environment:
 
 class Function:
     def __init__(self, name, params, param_types, return_type, body, env):
-        # params: list of param names
-        # param_types: list of type strings ('int','float','string','auto')
         self.name = name
         self.params = params
         self.param_types = param_types
         self.return_type = return_type
-        self.body = body  # block Tree
+        self.body = body
         self.env = env
 
 
@@ -294,8 +276,12 @@ class ReturnException(Exception):
 
 
 
-# TypeChecker (static) - extended for go/send/recv/type_expr
+# TypeChecker (conservative)
+
 class TypeChecker:
+    """
+    Conservative static type checker. Extended to tolerate test/assert/send/recv/type_expr/go.
+    """
     def __init__(self, tree: Tree, infer: bool = False):
         self.tree = tree
         self.infer = infer
@@ -304,14 +290,17 @@ class TypeChecker:
                          "make": {"param_types": ["auto"], "return_type": "chan"}}
 
     def check(self):
+        # collect functions
         for node in self.tree.children:
             if isinstance(node, Tree) and node.data == "func_def":
                 self._collect_signature(node)
 
+        # check top-level (non func_def) nodes (includes test defs)
         for node in self.tree.children:
             if not (isinstance(node, Tree) and node.data == "func_def"):
                 self._check_stmt(node, {}, [])
 
+        # ensure remaining functions checked
         for name, sig in list(self.functions.items()):
             if not sig.get("checked"):
                 self._check_function(sig)
@@ -418,7 +407,15 @@ class TypeChecker:
             self._expr_type(stmt.children[0], local_types)
             return
         if stmt.data == "go_stmt":
-            # type-check expression launched in background
+            self._expr_type(stmt.children[0], local_types)
+            return
+        if stmt.data == "test_def":
+            # check test body statements conservatively
+            block = stmt.children[1]
+            for s in block.children:
+                self._check_stmt(s, local_types.copy(), [])
+            return
+        if stmt.data == "assert_stmt":
             self._expr_type(stmt.children[0], local_types)
             return
 
@@ -460,6 +457,13 @@ class TypeChecker:
                 return "string"
             raise TypeError(f"Type error in arithmetic: {left} {node.data} {right}")
 
+        if node.data in ('eq', 'ne', 'lt', 'le', 'gt', 'ge'):
+            # comparisons -> boolean-ish; return 'auto' (conservative)
+            # but still check subexpr types for basic errors
+            self._expr_type(node.children[0], local_types)
+            self._expr_type(node.children[1], local_types)
+            return "auto"
+
         if node.data == 'func_call':
             name_tok = node.children[0]
             args_types = []
@@ -480,14 +484,12 @@ class TypeChecker:
             if len(args_types) != len(fsig["params"]):
                 raise TypeError(f"Function '{fname}' expects {len(fsig['params'])} args, got {len(args_types)}")
 
-                        # If inference is disabled, only statically check where parameter type is concrete (not 'auto')
             if not self.infer:
                 for i, actual in enumerate(args_types):
                     expected = fsig["param_types"][i] if i < len(fsig["param_types"]) else "auto"
                     if expected != "auto" and actual not in ("auto", "unknown") and not is_compatible(expected, actual):
                         raise TypeError(f"In call to '{fname}': argument {i+1} expected {expected}, got {actual}")
             else:
-                # inference-enabled: attempt to infer auto param types and re-check function body
                 changed = False
                 new_param_types = list(fsig["param_types"])
                 for i, actual in enumerate(args_types):
@@ -506,7 +508,6 @@ class TypeChecker:
                     if not is_compatible(expected, actual):
                         raise TypeError(f"In call to '{fname}': argument {i+1} expected {expected}, got {actual}")
 
-            # determine return type
             if fsig.get("return_type_decl") and fsig["return_type_decl"] != "auto":
                 return fsig["return_type_decl"]
             if fsig.get("inferred_return"):
@@ -520,15 +521,11 @@ class TypeChecker:
             return "chan"
 
         if node.data == 'send':
-            # send: NAME "<-" expr
-            # ensure channel exists and types roughly match (best-effort)
-            ch_name = get_name(node.children[0])
-            val_type = self._expr_type(node.children[1], local_types)
+            # best-effort: check element type of value
+            self._expr_type(node.children[1], local_types)
             return "void"
 
         if node.data == 'recv':
-            # recv: "<-" NAME
-            ch_name = get_name(node.children[0])
             return "unknown"
 
         if node.data == 'expr':
@@ -537,20 +534,34 @@ class TypeChecker:
         raise NotImplementedError(f"TypeChecker: unsupported node {node.data}")
 
 
-# Interpreter (runtime), extended with concurrency primitives
+
+# Interpreter (runtime)
+
 class Interpreter:
     def __init__(self):
         self.parser = Lark(chronos_grammar, parser="lalr", propagate_positions=True)
         self.global_env = Environment()
-        # builtin: print
+        # builtins
         self.global_env.set("print", lambda *args: print(*args))
+        # expose a trivial sleep for demos (optional)
+        try:
+            import time
+            self.global_env.set("sleep", lambda s: time.sleep(s))
+        except Exception:
+            pass
         self.type_info = {}
 
-    def run(self, src: str, skip_typecheck: bool = False, permissive: bool = False, infer: bool = False):
-
+    def run(self, src: str, skip_typecheck: bool = False, permissive: bool = False,
+            infer: bool = False, execute: bool = True, run_tests: bool = False):
+        """
+        Parse, optionally type-check, optionally execute, optionally run tests.
+        - execute=False: only type-check (used by `build`).
+        - run_tests=True: load module then run tests collected in file.
+        """
         src2 = preprocess_indent(src)
         tree = self.parser.parse(src2)
-        # run static checker
+
+        # static check
         if not skip_typecheck:
             checker = TypeChecker(tree, infer=infer)
             try:
@@ -559,7 +570,7 @@ class Interpreter:
                     self.type_info = checker.functions
             except TypeError as e:
                 if permissive:
-                    print(f"TypeWarning (static): {e}  -- continuing execution (permissive mode).")
+                    print(f"TypeWarning (static): {e} -- continuing (permissive).")
                     try:
                         self.type_info = checker.functions
                     except Exception:
@@ -567,12 +578,71 @@ class Interpreter:
                 else:
                     raise
 
-        # execute program (propagate permissive flag)
-        self.exec_tree(tree, self.global_env, permissive)
-
-    def exec_tree(self, tree: Tree, env: Environment, permissive: bool):
+        # partition nodes: non-test vs test
+        prelude_nodes = []
+        test_nodes = []
         for node in tree.children:
-            self.exec_stmt(node, env, permissive)
+            if isinstance(node, Tree) and node.data == "test_def":
+                test_nodes.append(node)
+            else:
+                prelude_nodes.append(node)
+
+        # prepare module environment and run prelude if execution requested
+        module_env = Environment()
+        # copy builtins into module_env
+        module_env.vars.update(self.global_env.vars)
+
+        if execute or run_tests:
+            # execute all prelude nodes (this sets up functions/variables/state)
+            for node in prelude_nodes:
+                # skip top-level test_def (already separated)
+                self.exec_stmt(node, module_env, permissive)
+
+        if run_tests:
+            return self._run_tests(test_nodes, module_env, permissive)
+
+        if execute:
+            return None  # normal run executed during prelude loop above
+
+        # nothing else to do (build-only)
+        return None
+
+    def _run_tests(self, test_nodes, module_env: Environment, permissive: bool):
+        results = []
+        for node in test_nodes:
+            # node.children: [STRING, block]
+            name_tok = node.children[0]
+            block_node = node.children[1]
+            try:
+                test_name = ast.literal_eval(name_tok.value) if isinstance(name_tok, Token) and name_tok.type == "STRING" else str(get_name(name_tok))
+            except Exception:
+                test_name = str(get_name(name_tok))
+
+            # run each test in a fresh child environment so tests are isolated
+            test_env = Environment(parent=module_env)
+            try:
+                self.exec_block(block_node, test_env, permissive)
+                results.append((test_name, "PASS", None))
+                print(f"[PASS] {test_name}")
+            except AssertionError as ae:
+                msg = str(ae) if ae.args else ""
+                results.append((test_name, "FAIL", msg))
+                print(f"[FAIL] {test_name}  -- assertion failed: {msg}")
+            except Exception as ex:
+                results.append((test_name, "ERROR", str(ex)))
+                print(f"[ERROR] {test_name}  -- exception: {ex}")
+
+        # summary
+        passed = sum(1 for r in results if r[1] == "PASS")
+        failed = sum(1 for r in results if r[1] == "FAIL")
+        errored = sum(1 for r in results if r[1] == "ERROR")
+        total = len(results)
+        print("")
+        print(f"Test results: {passed}/{total} passed, {failed} failed, {errored} errors")
+
+        # return non-zero exit condition if any failure/error
+        ok = (failed == 0 and errored == 0)
+        return ok
 
     def exec_stmt(self, node, env: Environment, permissive: bool):
         if isinstance(node, Token):
@@ -585,7 +655,6 @@ class Interpreter:
             return None
 
         if node.data == "func_def":
-            # children: NAME, params? , return_type? , block
             name_tok = node.children[0]
             params = []
             param_types = []
@@ -607,8 +676,6 @@ class Interpreter:
                     block_node = c
 
             fname = get_name(name_tok)
-
-            # prefer inferred param types from type_info if available
             if fname in self.type_info:
                 sig = self.type_info[fname]
                 if sig.get("param_types"):
@@ -627,7 +694,6 @@ class Interpreter:
 
         if node.data == "go_stmt":
             expr = node.children[0]
-            # If expr is a function call, prepare args but don't execute here
             if isinstance(expr, Tree) and expr.data == 'func_call':
                 name_tok = expr.children[0]
                 args_nodes = expr.children[1] if len(expr.children) > 1 else None
@@ -638,18 +704,15 @@ class Interpreter:
                 func_val = env.get(get_name(name_tok))
                 if not isinstance(func_val, Function):
                     raise TypeError(f"'go' applied to non-function '{get_name(name_tok)}'")
-
                 def target(fv=func_val, av=args_vals):
                     try:
                         self.call_function(fv, av, permissive)
                     except Exception as ex:
                         print("[background thread error]", ex)
-
                 t = threading.Thread(target=target, daemon=True)
                 t.start()
                 return None
             else:
-                # generic expression in new thread
                 def target_expr(e=expr, env_local=env):
                     try:
                         self.eval_expr(e, env_local, permissive)
@@ -658,6 +721,16 @@ class Interpreter:
                 t = threading.Thread(target=target_expr, daemon=True)
                 t.start()
                 return None
+
+        if node.data == "test_def":
+            # top-level test definitions are handled in run() : ignore on normal exec
+            return None
+
+        if node.data == "assert_stmt":
+            cond = self.eval_expr(node.children[0], env, permissive)
+            if not cond:
+                raise AssertionError("assertion failed")
+            return None
 
         if node.data == "return_stmt":
             val = self.eval_expr(node.children[0], env, permissive)
@@ -718,18 +791,14 @@ class Interpreter:
             rt = rtype(right)
 
             if node.data == 'add':
-                # numeric + numeric
                 if lt in ("int", "float") and rt in ("int", "float"):
                     return left + right
-                # string + string
                 if lt == "string" and rt == "string":
                     return left + right
-                # mixed: permissive -> coerce to string concatenation
                 if permissive:
                     return str(left) + str(right)
                 raise TypeError(f"Runtime type error in '+': {lt} + {rt}")
 
-            # other binary ops require numeric
             if lt in ("int", "float") and rt in ("int", "float"):
                 if node.data == 'sub':
                     return left - right
@@ -738,7 +807,6 @@ class Interpreter:
                 if node.data == 'div':
                     return left / right
             if permissive:
-                # coerce to float if possible
                 try:
                     l = float(left)
                     r = float(right)
@@ -753,6 +821,22 @@ class Interpreter:
                 raise TypeError(f"Runtime type error (permissive failed) in '{node.data}': {lt} {node.data} {rt}")
             raise TypeError(f"Runtime type error in '{node.data}': {lt} {node.data} {rt}")
 
+        if node.data in ('eq', 'ne', 'lt', 'le', 'gt', 'ge'):
+            left = self.eval_expr(node.children[0], env, permissive)
+            right = self.eval_expr(node.children[1], env, permissive)
+            if node.data == 'eq':
+                return left == right
+            if node.data == 'ne':
+                return left != right
+            if node.data == 'lt':
+                return left < right
+            if node.data == 'le':
+                return left <= right
+            if node.data == 'gt':
+                return left > right
+            if node.data == 'ge':
+                return left >= right
+
         if node.data == 'func_call':
             name_tok = node.children[0]
             args = []
@@ -764,7 +848,6 @@ class Interpreter:
             # special-case 'make' builtin expecting a type_expr sentinel
             if fname == 'make':
                 if args and isinstance(args[0], tuple) and args[0][0] == 'chan':
-                    # args[0] is ('chan', 'int') or ('chan', None)
                     elem = args[0][1]
                     return Channel(elem_type=elem)
                 return Channel()
@@ -786,7 +869,6 @@ class Interpreter:
             return ('chan', None)
 
         if node.data == 'send':
-            # send: NAME "<-" expr
             name_tok = node.children[0]
             val = self.eval_expr(node.children[1], env, permissive)
             ch = env.get(get_name(name_tok))
@@ -796,7 +878,6 @@ class Interpreter:
             return None
 
         if node.data == 'recv':
-            # recv: "<-" NAME
             name_tok = node.children[0]
             ch = env.get(get_name(name_tok))
             if not isinstance(ch, Channel):
@@ -809,7 +890,6 @@ class Interpreter:
         raise NotImplementedError(f"Unsupported node: {node.data}")
 
     def call_function(self, func: Function, args, permissive: bool):
-        # runtime argument type checks (respect permissive)
         for i, expected in enumerate(func.param_types):
             actual_val = args[i] if i < len(args) else None
             if actual_val is None:
@@ -827,18 +907,15 @@ class Interpreter:
 
             if not is_compatible(expected, actual_type):
                 if permissive:
-                    # attempt some safe coercions in permissive mode
                     if expected == "string":
                         args[i] = str(actual_val)
                     elif expected == "float" and actual_type == "int":
                         args[i] = float(actual_val)
                     else:
-                        # warn but continue (no coercion available)
                         print(f"RuntimeWarning: Function '{func.name}': argument {i+1} expected {expected}, got {actual_type} -- continuing (permissive)")
                 else:
                     raise TypeError(f"Function '{func.name}': argument {i+1} expected {expected}, got {actual_type}")
 
-        # prepare new env for function
         new_env = Environment(parent=func.env)
         for i, name in enumerate(func.params):
             val = args[i] if i < len(args) else None
@@ -852,22 +929,116 @@ class Interpreter:
 
 
 
-# Main CLI
+# CLI: build / run / test
 
 def main(argv):
+    # legacy convenience: if first arg looks like a path (not a subcommand or a flag),
+    # treat it as: run <path>
+    if len(argv) > 0 and not argv[0].startswith("-") and argv[0] not in ("run", "test", "build"):
+        argv = ["run"] + argv
+
     ap = argparse.ArgumentParser(prog="chronos/interpreter.py")
-    ap.add_argument("--infer", action="store_true", help="Enable inference of 'auto' param types from call-sites")
-    ap.add_argument("path", nargs="?", default="examples/hello.chronos", help="source file")
-    ap.add_argument("--permissive", action="store_true", help="Treat static type errors as warnings and coerce at runtime")
-    ap.add_argument("--skip-typecheck", action="store_true", help="Skip static type checking")
+    sub = ap.add_subparsers(dest="cmd", required=False)
+
+    # run
+    p_run = sub.add_parser("run", help="Run a ChronosLang source file")
+    p_run.add_argument("path", nargs="?", default="examples/hello.chronos")
+    p_run.add_argument("--skip-typecheck", action="store_true")
+    p_run.add_argument("--permissive", action="store_true")
+    p_run.add_argument("--infer", action="store_true")
+
+    # test
+    p_test = sub.add_parser("test", help="Run tests in a ChronosLang source file")
+    p_test.add_argument("path", nargs="?", default="examples")
+    p_test.add_argument("--skip-typecheck", action="store_true")
+    p_test.add_argument("--permissive", action="store_true")
+    p_test.add_argument("--infer", action="store_true")
+
+    # build (skeleton)
+    p_build = sub.add_parser("build", help="Build/package skeleton (type-check only)")
+    p_build.add_argument("path", nargs="?", default=".")
+    p_build.add_argument("--infer", action="store_true")
+
+    # legacy single-file invocation (keeps compatibility)
+    ap.add_argument("--infer", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--permissive", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--skip-typecheck", action="store_true", help=argparse.SUPPRESS)
+    # IMPORTANT: use a different dest name so we don't shadow subparser 'path'
+    ap.add_argument("legacy_path", nargs="?", default=None, help=argparse.SUPPRESS)
+
     args = ap.parse_args(argv)
-
-    with open(args.path, "r", encoding="utf-8") as f:
-        src = f.read()
-
     interp = Interpreter()
-    interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive)
 
+    # Helper to resolve a path value safely (prefers explicit subparser 'path', then legacy_path)
+    def resolved_path(parsed_args):
+        p = getattr(parsed_args, "path", None)
+        if p is not None:
+            return p
+        return getattr(parsed_args, "legacy_path", None)
 
-if __name__ == "__main__":
+    if args.cmd == "run":
+        path_to_open = resolved_path(args) or "examples/hello.chronos"
+        with open(path_to_open, "r", encoding="utf-8") as f:
+            src = f.read()
+        interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=False)
+        return
+
+    if args.cmd == "test":
+        # Run tests: if path is directory run every .chronos file; otherwise single file
+        import os
+        path = resolved_path(args) or "examples"
+        files = []
+        if os.path.isdir(path):
+            for fname in sorted(os.listdir(path)):
+                if fname.endswith(".chronos"):
+                    files.append(os.path.join(path, fname))
+        else:
+            files.append(path)
+        overall_ok = True
+        for fpath in files:
+            print(f"Running tests in {fpath}")
+            with open(fpath, "r", encoding="utf-8") as f:
+                src = f.read()
+            ok = interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=True)
+            if not ok:
+                overall_ok = False
+        if not overall_ok:
+            sys.exit(1)
+        return
+
+    if args.cmd == "build":
+        # Simple build: find a main file or typecheck given path
+        import os
+        path = resolved_path(args) or "."
+        main_file = None
+        if os.path.isdir(path):
+            # look for src/main.chronos or main.chronos
+            if os.path.exists(os.path.join(path, "src", "main.chronos")):
+                main_file = os.path.join(path, "src", "main.chronos")
+            elif os.path.exists(os.path.join(path, "main.chronos")):
+                main_file = os.path.join(path, "main.chronos")
+        else:
+            main_file = path
+        if not main_file or not os.path.exists(main_file):
+            print("Build: no main.chronos found in directory. Please specify a file.")
+            sys.exit(2)
+        with open(main_file, "r", encoding="utf-8") as f:
+            src = f.read()
+        # run type-check only (execute=False)
+        try:
+            interp.run(src, skip_typecheck=False, permissive=False, infer=args.infer, execute=False, run_tests=False)
+            print("Build: type-check OK")
+        except Exception as e:
+            print("Build failed:", e)
+            sys.exit(1)
+        return
+
+    # backward compatible single-file invocation: behave as 'run'
+    # read path from legacy_path or default if not provided
+    path = resolved_path(args) or "examples/hello.chronos"
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=False)
+
+if __name__ == '__main__':
     main(sys.argv[1:])
