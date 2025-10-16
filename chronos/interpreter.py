@@ -4,11 +4,15 @@ import ast
 import argparse
 import threading
 import queue
+import bisect
+import math
+import time as _time
 
 chronos_grammar = r"""
 start: stmt*
 
 ?stmt: var_assign
+     | temporal_decl
      | func_def
      | return_stmt
      | expr_stmt
@@ -24,7 +28,8 @@ return_type: "->" TYPE
 
 block: "{" stmt* "}"
 
-var_assign: NAME "=" expr
+temporal_decl: "temporal" NAME "=" expr time_spec?
+var_assign: NAME "=" expr time_spec?
 return_stmt: "return" expr
 expr_stmt: expr
 
@@ -68,6 +73,8 @@ recv: "<-" NAME               // <- ch
 
 type_expr: "chan" TYPE       // chan int, chan float, etc.
 
+time_spec: "@" "t" "+" NUMBER ("s")?    // @ t+2s or @ t+0.5s
+
 %import common.CNAME -> NAME
 %import common.SIGNED_NUMBER -> NUMBER
 %import common.ESCAPED_STRING -> STRING
@@ -80,9 +87,7 @@ TYPE: "int" | "float" | "string" | "auto"
 %ignore /#[^\n]*/
 """
 
-
 # Preprocessor (indent -> braces)
-
 def preprocess_indent(src: str) -> str:
     """
     Convert Python-style indentation to explicit { ... } blocks.
@@ -129,9 +134,7 @@ def preprocess_indent(src: str) -> str:
     return "\n".join(out_lines)
 
 
-
 # Channel (unbuffered rendezvous)
-
 class Channel:
     """
     Simple unbuffered rendezvous channel:
@@ -189,9 +192,119 @@ class Channel:
             return val
 
 
+# Temporal variable and timeline support
+class TemporalVar:
+    """
+    Holds a timeline of (time, value) pairs (time: float seconds).
+    value_at(t) returns the most recent value whose time <= t or None.
+    set_at(t, value) appends or inserts in sorted history.
+    """
+    def __init__(self, name, initial_value, timeline):
+        self.name = name
+        self.timeline = timeline  # reference to Timeline
+        # store history as two parallel lists for efficient bisect
+        self.times = [timeline.current_time]
+        self.values = [initial_value]
+
+    def set_at(self, t: float, value):
+        # insert in sorted order (replace if same time)
+        i = bisect.bisect_left(self.times, t)
+        if i < len(self.times) and math.isclose(self.times[i], t):
+            self.values[i] = value
+        else:
+            self.times.insert(i, t)
+            self.values.insert(i, value)
+
+    def value_at(self, t: float):
+        # return last value with time <= t
+        i = bisect.bisect_right(self.times, t) - 1
+        if i >= 0:
+            return self.values[i]
+        return None
+
+    def history(self):
+        return list(zip(self.times, self.values))
+
+
+class Timeline:
+    """
+    Collect scheduled assignments and advance a logical current_time.
+    scheduled events stored by time.
+    """
+    def __init__(self):
+        self.current_time = 0.0
+        self._events = {}  # map float -> list of (name, value)
+        self._sorted_times = []
+
+    def schedule(self, at_time: float, name: str, value):
+        at_time = float(at_time)
+        lst = self._events.get(at_time)
+        if lst is None:
+            self._events[at_time] = [(name, value)]
+            bisect.insort(self._sorted_times, at_time)
+        else:
+            lst.append((name, value))
+
+    def times(self):
+        return list(self._sorted_times)
+
+    def run_to(self, t: float, env: 'Environment'):
+        """
+        Advance current_time forward (or backward) and apply events up to new time.
+        When moving forward, apply events for times <= t (in order).
+        When moving backward, do nothing to applied history (history query will read older values).
+        """
+        if t < self.current_time:
+            # stepping backward — don't remove history; just move pointer
+            self.current_time = t
+            return
+
+        # apply events for times > current_time and <= t
+        i = 0
+        while i < len(self._sorted_times) and self._sorted_times[i] <= t:
+            event_time = self._sorted_times[i]
+            if event_time <= self.current_time:
+                i += 1
+                continue
+            # apply all events at event_time
+            for (name, value) in self._events.get(event_time, []):
+                try:
+                    v = env.get(name)
+                    if isinstance(v, TemporalVar):
+                        v.set_at(event_time, value)
+                    else:
+                        # replace plain var with TemporalVar preserving old value at time 0
+                        old = v
+                        tv = TemporalVar(name, old, self)
+                        tv.set_at(event_time, value)
+                        env.set(name, tv)
+                except NameError:
+                    # variable didn't exist before; create it as TemporalVar with no prior value
+                    tv = TemporalVar(name, None, self)
+                    tv.set_at(event_time, value)
+                    env.set(name, tv)
+            i += 1
+
+        # remove applied times up to t from _events and _sorted_times
+        to_remove = [et for et in self._sorted_times if et <= t]
+        for et in to_remove:
+            self._events.pop(et, None)
+            idx = bisect.bisect_left(self._sorted_times, et)
+            if idx < len(self._sorted_times) and self._sorted_times[idx] == et:
+                self._sorted_times.pop(idx)
+
+        self.current_time = t
+
+    def step_forward(self, seconds: float, env: 'Environment'):
+        newt = self.current_time + float(seconds)
+        self.run_to(newt, env)
+
+    def step_backward(self, seconds: float):
+        newt = max(0.0, self.current_time - float(seconds))
+        self.current_time = newt
+
 
 # Helpers (AST tokens/names)
-
 def get_name(node):
     """Return NAME/TYPE token string from Token or Tree wrapper."""
     if isinstance(node, Token):
@@ -208,7 +321,7 @@ def get_name(node):
 
 
 def extract_name_tokens(node):
-    """Return list of NAME/TYPE token string values found in node."""
+    """Return a list of NAME/TYPE token string values found in node."""
     out = []
     if isinstance(node, Token):
         if node.type in ("NAME", "TYPE"):
@@ -241,9 +354,7 @@ def is_compatible(expected, actual):
     return False
 
 
-
 # Runtime structures
-
 class Environment:
     def __init__(self, parent=None):
         self.vars = {}
@@ -275,12 +386,10 @@ class ReturnException(Exception):
         self.value = value
 
 
-
 # TypeChecker (conservative)
-
 class TypeChecker:
     """
-    Conservative static type checker. Extended to tolerate test/assert/send/recv/type_expr/go.
+    Conservative static type checker. Extended to tolerate test/assert/send/recv/type_expr/go/temporal.
     """
     def __init__(self, tree: Tree, infer: bool = False):
         self.tree = tree
@@ -388,10 +497,14 @@ class TypeChecker:
     def _check_stmt(self, stmt, local_types, returns):
         if isinstance(stmt, Token):
             return
-        if stmt.data == "var_assign":
+        if stmt.data == "var_assign" or stmt.data == "temporal_decl":
             name_tok = stmt.children[0]
-            expr = stmt.children[1]
-            et = self._expr_type(expr, local_types)
+            # expression is typically child 1
+            expr = stmt.children[1] if len(stmt.children) > 1 else None
+            if expr is not None:
+                et = self._expr_type(expr, local_types)
+            else:
+                et = "unknown"
             name = get_name(name_tok)
             if name in local_types:
                 old = local_types[name]
@@ -459,7 +572,6 @@ class TypeChecker:
 
         if node.data in ('eq', 'ne', 'lt', 'le', 'gt', 'ge'):
             # comparisons -> boolean-ish; return 'auto' (conservative)
-            # but still check subexpr types for basic errors
             self._expr_type(node.children[0], local_types)
             self._expr_type(node.children[1], local_types)
             return "auto"
@@ -534,9 +646,7 @@ class TypeChecker:
         raise NotImplementedError(f"TypeChecker: unsupported node {node.data}")
 
 
-
 # Interpreter (runtime)
-
 class Interpreter:
     def __init__(self):
         self.parser = Lark(chronos_grammar, parser="lalr", propagate_positions=True)
@@ -545,18 +655,20 @@ class Interpreter:
         self.global_env.set("print", lambda *args: print(*args))
         # expose a trivial sleep for demos (optional)
         try:
-            import time
-            self.global_env.set("sleep", lambda s: time.sleep(s))
+            self.global_env.set("sleep", lambda s: _time.sleep(s))
         except Exception:
             pass
         self.type_info = {}
+        # timeline for temporal variables
+        self.timeline = Timeline()
 
     def run(self, src: str, skip_typecheck: bool = False, permissive: bool = False,
-            infer: bool = False, execute: bool = True, run_tests: bool = False):
+            infer: bool = False, execute: bool = True, run_tests: bool = False, time_travel: bool = False):
         """
         Parse, optionally type-check, optionally execute, optionally run tests.
         - execute=False: only type-check (used by `build`).
         - run_tests=True: load module then run tests collected in file.
+        - time_travel=True: enter debug REPL after prelude.
         """
         src2 = preprocess_indent(src)
         tree = self.parser.parse(src2)
@@ -595,11 +707,15 @@ class Interpreter:
         if execute or run_tests:
             # execute all prelude nodes (this sets up functions/variables/state)
             for node in prelude_nodes:
-                # skip top-level test_def (already separated)
                 self.exec_stmt(node, module_env, permissive)
 
         if run_tests:
             return self._run_tests(test_nodes, module_env, permissive)
+
+        # optional time-travel debug REPL
+        if time_travel:
+            self.debug_repl(module_env)
+            return None
 
         if execute:
             return None  # normal run executed during prelude loop above
@@ -640,18 +756,77 @@ class Interpreter:
         print("")
         print(f"Test results: {passed}/{total} passed, {failed} failed, {errored} errors")
 
-        # return non-zero exit condition if any failure/error
         ok = (failed == 0 and errored == 0)
         return ok
 
     def exec_stmt(self, node, env: Environment, permissive: bool):
         if isinstance(node, Token):
             return
+
         if node.data == "var_assign":
             name_tok = node.children[0]
             expr = node.children[1]
+            time_spec = None
+            if len(node.children) > 2 and isinstance(node.children[2], Tree) and node.children[2].data == "time_spec":
+                time_spec = node.children[2]
             value = self.eval_expr(expr, env, permissive)
-            env.set(get_name(name_tok), value)
+
+            if time_spec is not None:
+                # find NUMBER token inside time_spec
+                offset = None
+                for c in time_spec.children:
+                    if isinstance(c, Token) and c.type == "NUMBER":
+                        offset = float(c.value)
+                        break
+                target_time = self.timeline.current_time + (offset if offset is not None else 0.0)
+                self.timeline.schedule(target_time, get_name(name_tok), value)
+            else:
+                # immediate assignment: if variable already TemporalVar, set at current time
+                try:
+                    old_val = env.get(get_name(name_tok))
+                    if isinstance(old_val, TemporalVar):
+                        old_val.set_at(self.timeline.current_time, value)
+                    else:
+                        env.set(get_name(name_tok), value)
+                except NameError:
+                    env.set(get_name(name_tok), value)
+            return None
+
+        if node.data == "temporal_decl":
+            # "temporal" NAME "=" expr time_spec?
+            name_tok = None
+            expr = None
+            time_spec = None
+            for c in node.children:
+                if isinstance(c, Token) and c.type == "NAME" and name_tok is None:
+                    name_tok = c
+                elif isinstance(c, Tree) and c.data == "time_spec":
+                    time_spec = c
+                elif isinstance(c, Tree) and expr is None:
+                    # treat first non-NAME Tree child as expr
+                    expr = c
+                elif isinstance(c, Token) and c.type != "NAME" and expr is None:
+                    # sometimes literal tokens (NUMBER/STRING) may appear directly
+                    expr = c
+
+            if name_tok is None and len(node.children) >= 1 and isinstance(node.children[0], Token):
+                name_tok = node.children[0]
+            if expr is None and len(node.children) >= 2 and isinstance(node.children[1], Tree):
+                expr = node.children[1]
+
+            value = self.eval_expr(expr, env, permissive) if expr is not None else None
+            tv = TemporalVar(get_name(name_tok), value, self.timeline)
+            env.set(get_name(name_tok), tv)
+
+            if time_spec is not None:
+                offset = None
+                for c in time_spec.children:
+                    if isinstance(c, Token) and c.type == "NUMBER":
+                        offset = float(c.value)
+                        break
+                if offset is not None:
+                    target_time = self.timeline.current_time + offset
+                    self.timeline.schedule(target_time, get_name(name_tok), value)
             return None
 
         if node.data == "func_def":
@@ -770,9 +945,14 @@ class Interpreter:
         if node.data == 'string':
             tok = node.children[0]
             return self.eval_expr(tok, env, permissive)
+
         if node.data == 'var':
             name = get_name(node.children[0])
-            return env.get(name)
+            val = env.get(name)
+            # If TemporalVar, return value at current timeline pointer
+            if isinstance(val, TemporalVar):
+                return val.value_at(self.timeline.current_time)
+            return val
 
         if node.data in ('add', 'sub', 'mul', 'div'):
             left = self.eval_expr(node.children[0], env, permissive)
@@ -927,10 +1107,80 @@ class Interpreter:
         except ReturnException as r:
             return r.value
 
+    def debug_repl(self, env: Environment):
+        """
+        Simple interactive time-travel debugger.
+        Commands:
+          forward <seconds>   - step forward (applies scheduled events)
+          back <seconds>      - step backward (moves time pointer)
+          time                - show current logical time
+          show <var>          - show current value of var at pointer
+          history <var>       - print full history of temporal var
+          times               - list scheduled event times
+          quit                - exit debugger
+        """
+        print("Entering ChronosLang time-travel debugger.")
+        print("Commands: forward <s>, back <s>, time, show <var>, history <var>, times, quit")
+        while True:
+            try:
+                line = input("chronos-debug> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                continue
+            parts = line.split()
+            cmd = parts[0]
+            arg = parts[1:] if len(parts) > 1 else []
+            try:
+                if cmd in ("q", "quit", "exit"):
+                    break
+                if cmd == "time":
+                    print(f"current_time = {self.timeline.current_time}")
+                    continue
+                if cmd == "forward":
+                    seconds = float(arg[0]) if arg else 1.0
+                    self.timeline.step_forward(seconds, env)
+                    print(f"advanced to {self.timeline.current_time}")
+                    continue
+                if cmd == "back":
+                    seconds = float(arg[0]) if arg else 1.0
+                    self.timeline.step_backward(seconds)
+                    print(f"moved back to {self.timeline.current_time}")
+                    continue
+                if cmd == "show" and arg:
+                    name = arg[0]
+                    try:
+                        v = env.get(name)
+                        if isinstance(v, TemporalVar):
+                            print(v.value_at(self.timeline.current_time))
+                        else:
+                            print(v)
+                    except NameError:
+                        print(f"Name '{name}' not found")
+                    continue
+                if cmd == "history" and arg:
+                    name = arg[0]
+                    try:
+                        v = env.get(name)
+                        if isinstance(v, TemporalVar):
+                            for t, val in v.history():
+                                print(f"{t}: {val}")
+                        else:
+                            print("not a temporal variable")
+                    except NameError:
+                        print(f"Name '{name}' not found")
+                    continue
+                if cmd == "times":
+                    print(self.timeline.times())
+                    continue
+                print("Unknown command")
+            except Exception as e:
+                print("Error:", e)
+        print("Exiting debugger.")
 
 
 # CLI: build / run / test
-
 def main(argv):
     # legacy convenience: if first arg looks like a path (not a subcommand or a flag),
     # treat it as: run <path>
@@ -946,6 +1196,7 @@ def main(argv):
     p_run.add_argument("--skip-typecheck", action="store_true")
     p_run.add_argument("--permissive", action="store_true")
     p_run.add_argument("--infer", action="store_true")
+    p_run.add_argument("--time-travel", action="store_true", help="Enter time-travel debugger after running prelude")
 
     # test
     p_test = sub.add_parser("test", help="Run tests in a ChronosLang source file")
@@ -980,7 +1231,8 @@ def main(argv):
         path_to_open = resolved_path(args) or "examples/hello.chronos"
         with open(path_to_open, "r", encoding="utf-8") as f:
             src = f.read()
-        interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=False)
+        interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive,
+                   infer=args.infer, execute=True, run_tests=False, time_travel=args.time_travel)
         return
 
     if args.cmd == "test":
@@ -999,7 +1251,8 @@ def main(argv):
             print(f"Running tests in {fpath}")
             with open(fpath, "r", encoding="utf-8") as f:
                 src = f.read()
-            ok = interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=True)
+            ok = interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive,
+                            infer=args.infer, execute=True, run_tests=True)
             if not ok:
                 overall_ok = False
         if not overall_ok:
@@ -1038,7 +1291,9 @@ def main(argv):
     path = resolved_path(args) or "examples/hello.chronos"
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
-    interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive, infer=args.infer, execute=True, run_tests=False)
+    interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive,
+               infer=args.infer, execute=True, run_tests=False, time_travel=getattr(args, "time_travel", False))
+
 
 if __name__ == '__main__':
     main(sys.argv[1:])

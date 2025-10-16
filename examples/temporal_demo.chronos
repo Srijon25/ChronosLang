@@ -1,0 +1,33 @@
+temporal x = 0
+print("initial x:", x)   # should print 0
+
+# schedule future updates
+x = 5 @ t+2s
+x = 7 @ t+5s
+
+print("after scheduling, at t=0 x =", x)
+
+# schedule another variable
+temporal y = 10
+y = 20 @ t+3s
+
+print("y at t=0:", y)
+
+# tiny function that reads temporal vars
+function snapshot():
+    return x + y
+
+print("snapshot@t0:", snapshot())
+
+# End of prelude — run with --time-travel to inspect history interactively.
+# Usage:
+#   python chronos/interpreter.py run examples/temporal_demo.chronos --time-travel
+#
+# In the time-travel REPL:
+#   time          -> show current logical time
+#   forward 2     -> advance to t=2 (applies x=5)
+#   show x        -> prints 5
+#   forward 3     -> advance to t=5 (applies x=7 and y=20)
+#   history x     -> show full timeline for x
+#   back 4        -> move pointer back to t=1
+#   show x        -> view historical value
