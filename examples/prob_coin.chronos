@@ -1,0 +1,8 @@
+theta = prob.uniform(0.0, 1.0)
+obs = prob.binomial(theta, 10, 7)   # use positional instead of n=10, observed=7
+posterior = prob.infer(theta, [obs] , "importance", 5000)
+print("posterior mean:", posterior.mean())
+ci = posterior.credible_interval(0.05)
+lo = ci[0]
+hi = ci[1]
+print("95% CI:", lo, hi)

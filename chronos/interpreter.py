@@ -7,6 +7,8 @@ import queue
 import bisect
 import math
 import time as _time
+import numpy as _np
+import math as _math
 
 chronos_grammar = r"""
 start: stmt*
@@ -21,6 +23,10 @@ start: stmt*
      | assert_stmt
 
 // function with optional type annotations
+dotted_name: NAME ("." NAME)*
+func_call: dotted_name "(" args? ")"
+args: expr ("," expr)*
+
 func_def: "function" NAME "(" params? ")" return_type? ":" block
 params: param ("," param)*
 param: NAME (":" TYPE)?
@@ -58,20 +64,20 @@ assert_stmt: "assert" expr
 
 ?factor: NUMBER        -> number
        | STRING        -> string
+       | list_literal
        | func_call
-       | NAME          -> var
+       | dotted_name    -> var
        | "(" expr ")"
        | send
        | recv
        | type_expr
 
-func_call: NAME "(" args? ")"
-args: expr ("," expr)*
+list_literal: "[" [expr ("," expr)*] "]"
 
 send: NAME "<-" expr          // ch <- expr
 recv: "<-" NAME               // <- ch
 
-type_expr: "chan" TYPE       // chan int, chan float, etc.
+type_expr: "chan" TYPE        // chan int, chan float, etc.
 
 time_spec: "@" "t" "+" NUMBER ("s")?    // @ t+2s or @ t+0.5s
 
@@ -79,10 +85,8 @@ time_spec: "@" "t" "+" NUMBER ("s")?    // @ t+2s or @ t+0.5s
 %import common.SIGNED_NUMBER -> NUMBER
 %import common.ESCAPED_STRING -> STRING
 
-// TYPE is a terminal listing supported builtin types
 TYPE: "int" | "float" | "string" | "auto"
 
-// Ignore whitespace and comments
 %ignore /[ \t\f\r\n]+/
 %ignore /#[^\n]*/
 """
@@ -132,6 +136,33 @@ def preprocess_indent(src: str) -> str:
         indent_stack.pop()
 
     return "\n".join(out_lines)
+
+
+# Helper Classes / Functions
+
+class ListType:
+    def __init__(self, elem_type=None):
+        self.elem_type = elem_type
+
+    def __repr__(self):
+        return f"List[{self.elem_type}]"
+
+def get_name(tok):
+    return tok.value if isinstance(tok, Token) else str(tok)
+
+def extract_name_tokens(node):
+    # Returns list of names from a tree node (for params, types)
+    if isinstance(node, Tree):
+        return [get_name(c) for c in node.children if isinstance(c, Token)]
+    return []
+
+def is_compatible(expected, actual):
+    # Conservative compatibility
+    if expected == "auto" or actual == "auto" or expected == actual:
+        return True
+    if expected == "float" and actual == "int":
+        return True
+    return False
 
 
 # Channel (unbuffered rendezvous)
@@ -306,17 +337,21 @@ class Timeline:
 
 # Helpers (AST tokens/names)
 def get_name(node):
-    """Return NAME/TYPE token string from Token or Tree wrapper."""
+    """Return single name or dotted name string from Token or Tree."""
     if isinstance(node, Token):
         return node.value
     if isinstance(node, Tree):
+        # For dotted_name or similar: join NAME tokens with "."
+        names = []
         for c in node.children:
-            if isinstance(c, Token) and c.type in ("NAME", "TYPE"):
-                return c.value
-            if isinstance(c, Tree):
+            if isinstance(c, Token) and c.type == "NAME":
+                names.append(c.value)
+            elif isinstance(c, Tree):
                 v = get_name(c)
                 if v:
-                    return v
+                    names.append(v)
+        if names:
+            return ".".join(names)
     return None
 
 
@@ -385,7 +420,6 @@ class ReturnException(Exception):
     def __init__(self, value):
         self.value = value
 
-
 # TypeChecker (conservative)
 class TypeChecker:
     """
@@ -395,8 +429,18 @@ class TypeChecker:
         self.tree = tree
         self.infer = infer
         self.functions = {}
-        self.builtins = {"print": {"param_types": ["auto"], "return_type": "void"},
-                         "make": {"param_types": ["auto"], "return_type": "chan"}}
+        self.builtins = {
+            "print": {"param_types": ["auto"], "return_type": "void"},
+            "make": {"param_types": ["auto"], "return_type": "chan"},
+            # prob module builtins (conservative)
+            "prob.uniform": {"param_types": ["float", "float"], "return_type": "auto"},
+            "prob.normal": {"param_types": ["float", "float"], "return_type": "auto"},
+            "prob.bernoulli": {"param_types": ["float"], "return_type": "auto"},
+            "prob.binomial": {"param_types": ["auto"], "return_type": "auto"},
+            "prob.infer": {"param_types": ["auto", "auto"], "return_type": "auto"},
+        }
+
+    # Top-level check
 
     def check(self):
         # collect functions
@@ -413,6 +457,8 @@ class TypeChecker:
         for name, sig in list(self.functions.items()):
             if not sig.get("checked"):
                 self._check_function(sig)
+
+    # Collect function signature
 
     def _collect_signature(self, node: Tree):
         name_tok = node.children[0]
@@ -451,13 +497,13 @@ class TypeChecker:
             "checked": False,
         }
 
+    # Check function body
+
     def _check_function(self, sig):
         if sig.get("checked"):
             return
-        local_types = {}
-        for i, pname in enumerate(sig["params"]):
-            ptype = sig["param_types"][i] if i < len(sig["param_types"]) else "auto"
-            local_types[pname] = ptype
+        local_types = {pname: sig["param_types"][i] if i < len(sig["param_types"]) else "auto"
+                       for i, pname in enumerate(sig["params"])}
 
         returns = []
         block = sig["block"]
@@ -494,17 +540,15 @@ class TypeChecker:
 
         sig["checked"] = True
 
+    # Check statements
+
     def _check_stmt(self, stmt, local_types, returns):
         if isinstance(stmt, Token):
             return
-        if stmt.data == "var_assign" or stmt.data == "temporal_decl":
+        if stmt.data in ("var_assign", "temporal_decl"):
             name_tok = stmt.children[0]
-            # expression is typically child 1
             expr = stmt.children[1] if len(stmt.children) > 1 else None
-            if expr is not None:
-                et = self._expr_type(expr, local_types)
-            else:
-                et = "unknown"
+            et = self._expr_type(expr, local_types) if expr else "unknown"
             name = get_name(name_tok)
             if name in local_types:
                 old = local_types[name]
@@ -516,14 +560,10 @@ class TypeChecker:
             et = self._expr_type(stmt.children[0], local_types)
             returns.append(et)
             return
-        if stmt.data == "expr_stmt":
-            self._expr_type(stmt.children[0], local_types)
-            return
-        if stmt.data == "go_stmt":
+        if stmt.data in ("expr_stmt", "go_stmt"):
             self._expr_type(stmt.children[0], local_types)
             return
         if stmt.data == "test_def":
-            # check test body statements conservatively
             block = stmt.children[1]
             for s in block.children:
                 self._check_stmt(s, local_types.copy(), [])
@@ -532,14 +572,12 @@ class TypeChecker:
             self._expr_type(stmt.children[0], local_types)
             return
 
+    # Expression type
+
     def _expr_type(self, node, local_types):
-        # Token leaf
         if isinstance(node, Token):
             if node.type == 'NUMBER':
-                s = node.value
-                if '.' in s or 'e' in s or 'E' in s:
-                    return "float"
-                return "int"
+                return "float" if '.' in node.value else "int"
             if node.type == 'STRING':
                 return "string"
             if node.type == 'NAME':
@@ -553,25 +591,23 @@ class TypeChecker:
             return self._expr_type(node.children[0], local_types)
         if node.data == 'string':
             return self._expr_type(node.children[0], local_types)
+        if node.data == "list_literal":
+            elem_types = [self._expr_type(e, local_types) for e in node.children]
+            return ListType(elem_types[0] if elem_types else None)
         if node.data == 'var':
             name = get_name(node.children[0])
             return local_types.get(name, "unknown")
-
         if node.data in ('add', 'sub', 'mul', 'div'):
             left = self._expr_type(node.children[0], local_types)
             right = self._expr_type(node.children[1], local_types)
             if left in {"int", "float"} and right in {"int", "float"}:
-                return "float" if ("float" in (left, right)) else "int"
-            if left == "auto" or right == "auto" or left == "unknown" or right == "unknown":
-                if node.data == 'add' and (left == "string" or right == "string"):
-                    return "string"
+                return "float" if "float" in (left, right) else "int"
+            if left == "auto" or right == "auto":
                 return "auto"
             if node.data == 'add' and left == "string" and right == "string":
                 return "string"
             raise TypeError(f"Type error in arithmetic: {left} {node.data} {right}")
-
         if node.data in ('eq', 'ne', 'lt', 'le', 'gt', 'ge'):
-            # comparisons -> boolean-ish; return 'auto' (conservative)
             self._expr_type(node.children[0], local_types)
             self._expr_type(node.children[1], local_types)
             return "auto"
@@ -585,7 +621,11 @@ class TypeChecker:
                     args_types.append(self._expr_type(expr, local_types))
             fname = get_name(name_tok)
 
-            # builtin
+            # handle dotted/method calls
+            if '.' in fname:
+                # conservative: assume returns float
+                return "float"
+
             if fname in self.builtins:
                 return self.builtins[fname]["return_type"]
 
@@ -601,49 +641,185 @@ class TypeChecker:
                     expected = fsig["param_types"][i] if i < len(fsig["param_types"]) else "auto"
                     if expected != "auto" and actual not in ("auto", "unknown") and not is_compatible(expected, actual):
                         raise TypeError(f"In call to '{fname}': argument {i+1} expected {expected}, got {actual}")
-            else:
-                changed = False
-                new_param_types = list(fsig["param_types"])
-                for i, actual in enumerate(args_types):
-                    expected = new_param_types[i] if i < len(new_param_types) else "auto"
-                    if expected == "auto" and actual not in ("auto", "unknown"):
-                        new_param_types[i] = actual
-                        changed = True
-                    else:
-                        if expected != "auto" and actual not in ("auto", "unknown") and not is_compatible(expected, actual):
-                            raise TypeError(f"In call to '{fname}': argument {i+1} expected {expected}, got {actual}")
-                if changed:
-                    fsig["param_types"] = new_param_types
-                    self._check_function(fsig)
-                for i, actual in enumerate(args_types):
-                    expected = fsig["param_types"][i] if i < len(fsig["param_types"]) else "auto"
-                    if not is_compatible(expected, actual):
-                        raise TypeError(f"In call to '{fname}': argument {i+1} expected {expected}, got {actual}")
 
-            if fsig.get("return_type_decl") and fsig["return_type_decl"] != "auto":
-                return fsig["return_type_decl"]
-            if fsig.get("inferred_return"):
-                return fsig["inferred_return"]
-            return "auto"
+            return fsig.get("inferred_return") or fsig.get("return_type_decl") or "auto"
 
         if node.data == 'type_expr':
             names = extract_name_tokens(node)
             if len(names) >= 2 and names[0] == 'chan':
                 return f"chan<{names[1]}>"
             return "chan"
-
         if node.data == 'send':
-            # best-effort: check element type of value
             self._expr_type(node.children[1], local_types)
             return "void"
-
         if node.data == 'recv':
             return "unknown"
-
         if node.data == 'expr':
             return self._expr_type(node.children[0], local_types)
 
         raise NotImplementedError(f"TypeChecker: unsupported node {node.data}")
+
+
+# Probabilistic module
+
+# Lightweight Distribution abstractions (no external SciPy dependency)
+class Distribution:
+    def sample(self, rng):
+        raise NotImplementedError()
+    def logpdf(self, x):
+        raise NotImplementedError()
+
+class Uniform(Distribution):
+    def __init__(self, a, b):
+        assert b > a
+        self.a = float(a); self.b = float(b)
+    def sample(self, rng):
+        return rng.uniform(self.a, self.b)
+    def logpdf(self, x):
+        if self.a <= x <= self.b:
+            return -_math.log(self.b - self.a)
+        return -_math.inf
+
+class Normal(Distribution):
+    def __init__(self, mu, sigma):
+        self.mu = float(mu); self.sigma = float(sigma)
+    def sample(self, rng):
+        return rng.normal(self.mu, self.sigma)
+    def logpdf(self, x):
+        return -0.5 * _math.log(2*_math.pi*(self.sigma**2)) - 0.5*((x - self.mu)**2)/(self.sigma**2)
+
+class Bernoulli(Distribution):
+    def __init__(self, p):
+        self.p = p
+    def sample(self, rng):
+        return 1 if rng.uniform() < self.p else 0
+    def logpmf(self, k):
+        if k not in (0,1): return -_math.inf
+        return _math.log(self.p if k==1 else 1-self.p)
+
+class BinomialLikelihood:
+    def __init__(self, theta_ref, n, observed=None):
+        # theta_ref: Distribution instance (prior) or numeric (rare)
+        self.theta_ref = theta_ref
+        self.n = int(n)
+        self.observed = None if observed is None else int(observed)
+    def loglik(self, theta_value):
+        # log P(data | theta)
+        if self.observed is None:
+            return 0.0  # no data
+        k = self.observed
+        # Use log binomial pmf: log C(n,k) + k log(theta) + (n-k) log(1-theta)
+        if theta_value <= 0 or theta_value >= 1:
+            # handle edge cases numerically
+            if k == 0 and theta_value == 0:
+                return 0.0
+            if k == self.n and theta_value == 1:
+                return 0.0
+            return -_math.inf
+        comb = _math.lgamma(self.n + 1) - _math.lgamma(k + 1) - _math.lgamma(self.n - k + 1)
+        return comb + k*_math.log(theta_value) + (self.n - k)*_math.log(1 - theta_value)
+
+class Posterior:
+    def __init__(self, samples, weights=None):
+        self.samples = _np.asarray(samples)
+        self.weights = None if weights is None else _np.asarray(weights)
+    def mean(self):
+        if self.weights is None:
+            return float(self.samples.mean())
+        return float((self.samples * self.weights).sum() / self.weights.sum())
+    def credible_interval(self, alpha=0.05):
+        if self.weights is None:
+            lo = float(_np.percentile(self.samples, 100*alpha/2))
+            hi = float(_np.percentile(self.samples, 100*(1-alpha/2)))
+            return lo, hi
+        order = _np.argsort(self.samples)
+        s = self.samples[order]
+        w = self.weights[order].cumsum()
+        w = w / w[-1]
+        lo = float(_np.interp(alpha/2, w, s))
+        hi = float(_np.interp(1-alpha/2, w, s))
+        return lo, hi
+
+def importance_sampling(prior_dist, likelihoods, nsamples=2000, seed=None):
+    rng = _np.random.default_rng(seed)
+    samples = []
+    log_weights = []
+    for i in range(nsamples):
+        theta = prior_dist.sample(rng)
+        logw = 0.0
+        for lik in likelihoods:
+            logw += lik.loglik(theta)
+        samples.append(theta)
+        log_weights.append(logw)
+    log_weights = _np.array(log_weights)
+    maxlw = float(log_weights.max())
+    w = _np.exp(log_weights - maxlw)
+    w_sum = w.sum()
+    if w_sum == 0:
+        # fallback to uniform weights if numerical underflow
+        w = _np.ones_like(w) / len(w)
+    else:
+        w = w / w_sum
+    return Posterior(_np.array(samples), w)
+
+def metropolis_hastings(prior_dist, likelihoods, nsamples=2000, burn=500, thin=1, proposal_scale=0.1, seed=None):
+    rng = _np.random.default_rng(seed)
+    x = prior_dist.sample(rng)
+    samples = []
+    current_logpost = prior_dist.logpdf(x) + sum(l.loglik(x) for l in likelihoods)
+    for i in range(nsamples * thin + burn):
+        proposal = x + rng.normal(0, proposal_scale)
+        lp = prior_dist.logpdf(proposal)
+        if lp == -_math.inf:
+            accept = False
+        else:
+            prop_logpost = lp + sum(l.loglik(proposal) for l in likelihoods)
+            log_alpha = prop_logpost - current_logpost
+            accept = (_math.log(rng.uniform()) < log_alpha)
+        if accept:
+            x = proposal
+            current_logpost = prop_logpost
+        if i >= burn and ((i - burn) % thin == 0):
+            samples.append(x)
+    return Posterior(_np.array(samples))
+
+class ProbModule:
+    def uniform(self, a, b):
+        return Uniform(a, b)
+    def normal(self, mu, sigma):
+        return Normal(mu, sigma)
+    def bernoulli(self, p):
+        return Bernoulli(p)
+    def binomial(self, theta_ref, n=1, observed=None):
+        return BinomialLikelihood(theta_ref, n, observed)
+    def infer(self, param, observations, method="importance", nsamples=2000, **kwargs):
+        if method == "importance":
+            return importance_sampling(param, observations, nsamples=nsamples, **kwargs)
+        elif method in ("mh", "mcmc"):
+            return metropolis_hastings(param, observations, nsamples=nsamples, **kwargs)
+        else:
+            raise ValueError("Unknown inference method: " + str(method))
+
+# single shared instance to attach to interpreter globals later
+_prob_instance = ProbModule()
+
+
+
+# Helper to resolve dotted names at runtime
+def resolve_dotted(name: str, env: Environment):
+    """
+    Resolve a dotted name string like 'prob.uniform' in the given env.
+    Returns Python object (callable or value). Raises NameError if not found.
+    """
+    parts = name.split(".")
+    first = parts[0]
+    obj = env.get(first)
+    for attr in parts[1:]:
+        try:
+            obj = getattr(obj, attr)
+        except Exception as e:
+            raise NameError(f"Attribute '{attr}' not found on '{'.'.join(parts[:parts.index(attr)])}': {e}")
+    return obj
 
 
 # Interpreter (runtime)
@@ -658,6 +834,9 @@ class Interpreter:
             self.global_env.set("sleep", lambda s: _time.sleep(s))
         except Exception:
             pass
+        # attach prob module instance for Week 6
+        self.global_env.set("prob", _prob_instance)
+
         self.type_info = {}
         # timeline for temporal variables
         self.timeline = Timeline()
@@ -945,6 +1124,9 @@ class Interpreter:
         if node.data == 'string':
             tok = node.children[0]
             return self.eval_expr(tok, env, permissive)
+        
+        if node.data == 'list_literal':
+            return [self.eval_expr(c, env, permissive) for c in node.children]
 
         if node.data == 'var':
             name = get_name(node.children[0])
@@ -1032,10 +1214,12 @@ class Interpreter:
                     return Channel(elem_type=elem)
                 return Channel()
 
+            # Try to resolve dotted names to methods/attributes
             try:
-                func_val = env.get(fname)
+                func_val = resolve_dotted(fname, env) if "." in fname else env.get(fname)
             except NameError:
                 raise NameError(f"Function '{fname}' is not defined")
+            # If it's a Python callable (e.g., builtin lambda or prob.* bound method)
             if callable(func_val) and not isinstance(func_val, Function):
                 return func_val(*args)
             if isinstance(func_val, Function):
