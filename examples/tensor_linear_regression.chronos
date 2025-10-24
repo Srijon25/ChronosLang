@@ -1,0 +1,27 @@
+# Create training data (y = 2*x + 1)
+X = tensor([[1.0], [2.0], [3.0], [4.0], [5.0]])
+y = tensor([[3.0], [5.0], [7.0], [9.0], [11.0]])
+
+print("Training data X:")
+print(X)
+print("Training targets y:")
+print(y)
+
+# Train simple linear model y = w * x + b
+# Note: use positional args — grammar does not support keyword args in calls.
+w, b = ml.linear_regression_train(X, y, 500, 0.05)
+
+print("Training completed!")
+print("Weights:", w)
+print("Bias:", b)
+
+# Test the trained model on new data
+X_test = tensor([[6.0]])
+# compute prediction: y_pred = X_test @ w + b
+y_pred = ml.add(ml.matmul(X_test, w), b)
+print("Prediction for x=6:", y_pred)
+
+# Compute training loss (MSE) to confirm fit
+y_hat = ml.add(ml.matmul(X, w), b)
+loss = ml.mse_loss(y_hat, y)
+print("Final training loss:", loss)

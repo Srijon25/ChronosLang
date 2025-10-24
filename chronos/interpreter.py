@@ -10,6 +10,12 @@ import time as _time
 import numpy as _np
 import math as _math
 
+# Optional PyTorch for acceleration/autodiff
+try:
+    import torch as _torch
+except Exception:
+    _torch = None
+
 chronos_grammar = r"""
 start: stmt*
 
@@ -35,7 +41,10 @@ return_type: "->" TYPE
 block: "{" stmt* "}"
 
 temporal_decl: "temporal" NAME "=" expr time_spec?
-var_assign: NAME "=" expr time_spec?
+
+assign_targets: NAME ("," NAME)*
+var_assign: assign_targets "=" expr time_spec?
+
 return_stmt: "return" expr
 expr_stmt: expr
 
@@ -438,6 +447,10 @@ class TypeChecker:
             "prob.bernoulli": {"param_types": ["float"], "return_type": "auto"},
             "prob.binomial": {"param_types": ["auto"], "return_type": "auto"},
             "prob.infer": {"param_types": ["auto", "auto"], "return_type": "auto"},
+            # ml module builtins (conservative)
+            "ml.tensor": {"param_types": ["auto"], "return_type": "auto"},
+            "ml.linear_regression_train": {"param_types": ["auto", "auto"], "return_type": "auto"},
+            "tensor": {"param_types": ["auto"], "return_type": "auto"},
         }
 
     # Top-level check
@@ -805,6 +818,119 @@ _prob_instance = ProbModule()
 
 
 
+# Machine Learning Support (tensor + autodiff)
+
+
+# Lightweight NumPy tensor wrapper used when torch is not available
+class NumpyTensor:
+    def __init__(self, arr):
+        self._arr = _np.asarray(arr, dtype=_np.float32)
+    def numpy(self):
+        return self._arr
+    def shape(self):
+        return self._arr.shape
+    def __repr__(self):
+        return f"NumpyTensor({self._arr!r})"
+
+class MLModule:
+    def tensor(self, obj):
+        """
+        Create a tensor. If torch available, return torch.Tensor with requires_grad=True.
+        Otherwise return NumpyTensor wrapper.
+        """
+        if _torch is not None:
+            t = _torch.tensor(obj, dtype=_torch.float32)
+            # For inputs we usually don't want requires_grad by default except parameters;
+            # but for simplicity allow gradients on constructed tensors:
+            t.requires_grad_(True)
+            return t
+        else:
+            return NumpyTensor(obj)
+
+    def to_numpy(self, t):
+        if _torch is not None and isinstance(t, _torch.Tensor):
+            return t.detach().cpu().numpy()
+        if isinstance(t, NumpyTensor):
+            return t.numpy()
+        if isinstance(t, _np.ndarray):
+            return t
+        return _np.asarray(t)
+
+    def matmul(self, a, b):
+        if _torch is not None and isinstance(a, _torch.Tensor) and isinstance(b, _torch.Tensor):
+            return _torch.matmul(a, b)
+        return _np.matmul(self.to_numpy(a), self.to_numpy(b))
+
+    def add(self, a, b):
+        if _torch is not None and isinstance(a, _torch.Tensor) and isinstance(b, _torch.Tensor):
+            return a + b
+        return self.to_numpy(a) + self.to_numpy(b)
+
+    def sum(self, a, axis=None):
+        if _torch is not None and isinstance(a, _torch.Tensor):
+            return a.sum(dim=axis) if axis is not None else a.sum()
+        return self.to_numpy(a).sum(axis=axis)
+
+    def mean(self, a, axis=None):
+        if _torch is not None and isinstance(a, _torch.Tensor):
+            return a.mean(dim=axis) if axis is not None else a.mean()
+        return self.to_numpy(a).mean(axis=axis)
+
+    def mse_loss(self, preds, targets):
+        if _torch is not None and isinstance(preds, _torch.Tensor) and isinstance(targets, _torch.Tensor):
+            return _torch.mean((preds - targets) ** 2)
+        p = self.to_numpy(preds)
+        t = self.to_numpy(targets)
+        return float(((p - t) ** 2).mean())
+
+    def linear_regression_train(self, X, y, epochs=1000, lr=0.01):
+        """
+        If torch available: train linear model w,b with SGD + autodiff and return (w, b)
+        If not: return closed-form linear least squares solution (w, b) using NumPy.
+        Returns tuples as numpy arrays / floats.
+        """
+        X_np = self.to_numpy(X)
+        y_np = self.to_numpy(y).reshape(-1)
+        # ensure 2D X
+        if X_np.ndim == 1:
+            X_np = X_np.reshape(-1, 1)
+
+        if _torch is not None:
+            # Torch path: convert to tensors (float), enable grad for params
+            X_t = _torch.tensor(X_np, dtype=_torch.float32)
+            y_t = _torch.tensor(y_np, dtype=_torch.float32).view(-1, 1)
+            n_features = X_t.shape[1]
+            # initialize weights and bias
+            w = _torch.randn(n_features, 1, dtype=_torch.float32, requires_grad=True)
+            b = _torch.randn(1, 1, dtype=_torch.float32, requires_grad=True)
+            opt = _torch.optim.SGD([w, b], lr=lr)
+            for _ in range(int(epochs)):
+                opt.zero_grad()
+                preds = X_t.matmul(w) + b
+                loss = _torch.mean((preds.view(-1) - y_t.view(-1)) ** 2)
+                loss.backward()
+                opt.step()
+            w_np = w.detach().cpu().numpy().reshape(-1)
+            b_np = float(b.detach().cpu().numpy().reshape(()))
+            return w_np, b_np
+        else:
+            # closed form via normal equation (with bias)
+            n, d = X_np.shape
+            X_aug = _np.concatenate([X_np, _np.ones((n, 1))], axis=1)  # last column is bias
+            # solve least squares: theta = (X^T X)^-1 X^T y
+            try:
+                theta = _np.linalg.pinv(X_aug.T @ X_aug) @ (X_aug.T @ y_np)
+            except Exception:
+                theta = _np.linalg.lstsq(X_aug, y_np, rcond=None)[0]
+            w_np = theta[:-1]
+            b_np = float(theta[-1])
+            return w_np, b_np
+
+# single shared instance
+_ml_instance = MLModule()
+
+
+
 # Helper to resolve dotted names at runtime
 def resolve_dotted(name: str, env: Environment):
     """
@@ -836,6 +962,10 @@ class Interpreter:
             pass
         # attach prob module instance for Week 6
         self.global_env.set("prob", _prob_instance)
+        # attach ml module instance and top-level tensor shortcut for Week 7
+        self.global_env.set("ml", _ml_instance)
+        # also expose top-level 'tensor' convenience
+        self.global_env.set("tensor", _ml_instance.tensor)
 
         self.type_info = {}
         # timeline for temporal variables
@@ -941,35 +1071,83 @@ class Interpreter:
     def exec_stmt(self, node, env: Environment, permissive: bool):
         if isinstance(node, Token):
             return
-
+        
         if node.data == "var_assign":
-            name_tok = node.children[0]
+            # support multiple assignment on LHS: assign_targets "=" expr time_spec?
+            lhs = node.children[0]
             expr = node.children[1]
             time_spec = None
             if len(node.children) > 2 and isinstance(node.children[2], Tree) and node.children[2].data == "time_spec":
                 time_spec = node.children[2]
+
             value = self.eval_expr(expr, env, permissive)
 
+            # collect target names (either single NAME or assign_targets Tree)
+            if isinstance(lhs, Tree) and lhs.data == "assign_targets":
+                targets = [get_name(t) for t in lhs.children]
+            elif isinstance(lhs, Token) and lhs.type == "NAME":
+                targets = [lhs.value]
+            else:
+                # fallback: try to extract token name
+                targets = [get_name(lhs)]
+
             if time_spec is not None:
-                # find NUMBER token inside time_spec
+                # schedule whole value to name(s) at the given time.
+                # If there are multiple targets, schedule the same value to each name.
                 offset = None
                 for c in time_spec.children:
                     if isinstance(c, Token) and c.type == "NUMBER":
                         offset = float(c.value)
                         break
                 target_time = self.timeline.current_time + (offset if offset is not None else 0.0)
-                self.timeline.schedule(target_time, get_name(name_tok), value)
+                for tname in targets:
+                    self.timeline.schedule(target_time, tname, value)
             else:
-                # immediate assignment: if variable already TemporalVar, set at current time
+                # immediate assignment: if multiple targets, try to unpack iterable value
                 try:
-                    old_val = env.get(get_name(name_tok))
-                    if isinstance(old_val, TemporalVar):
-                        old_val.set_at(self.timeline.current_time, value)
+                    old_val = None
+                    # If only one target, preserve previous TemporalVar behavior
+                    if len(targets) == 1:
+                        name0 = targets[0]
+                        try:
+                            old_val = env.get(name0)
+                        except NameError:
+                            old_val = None
+                        if isinstance(old_val, TemporalVar):
+                            old_val.set_at(self.timeline.current_time, value)
+                        else:
+                            env.set(name0, value)
                     else:
-                        env.set(get_name(name_tok), value)
-                except NameError:
-                    env.set(get_name(name_tok), value)
+                        # multiple targets: attempt to unpack value (tuple/list/ndarray)
+                        # Accept Python tuple/list or numpy arrays; if numpy array 1-D and length matches, unpack elements.
+                        unpack_vals = None
+                        if isinstance(value, (list, tuple)):
+                            unpack_vals = list(value)
+                        elif hasattr(value, 'tolist'):
+                            # numpy arrays and torch tensors may have tolist()
+                            try:
+                                unpack_vals = value.tolist()
+                            except Exception:
+                                unpack_vals = None
+                        if unpack_vals is None:
+                            raise TypeError("Right-hand side is not iterable for multiple assignment")
+                        if len(unpack_vals) != len(targets):
+                            raise ValueError(f"Cannot unpack {len(unpack_vals)} values into {len(targets)} targets")
+                        for tname, val_item in zip(targets, unpack_vals):
+                            try:
+                                old_val = env.get(tname)
+                                if isinstance(old_val, TemporalVar):
+                                    old_val.set_at(self.timeline.current_time, val_item)
+                                else:
+                                    env.set(tname, val_item)
+                            except NameError:
+                                env.set(tname, val_item)
+                except Exception as e:
+                    # On error, surface it (consistent with prior behavior)
+                    raise
+
             return None
+
 
         if node.data == "temporal_decl":
             # "temporal" NAME "=" expr time_spec?
