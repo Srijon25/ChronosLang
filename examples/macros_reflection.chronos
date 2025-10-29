@@ -1,0 +1,42 @@
+# MACROS
+
+# Macro to log a value at compile-time
+macro log(expr):
+    print("🔍 [Macro Log] Value:", expr)
+
+# Macro to print the type of an expression
+macro debug_type(expr):
+    print("🧠 [Type Info] Type of expression:", reflect_type(expr))
+
+# Macro to list all global variables
+macro list_globals():
+    print("🌐 [Globals]:", reflect_globals()) 
+
+
+
+# FUNCTIONS & USAGE
+
+# Simple function to demonstrate computation
+function square(x: int) -> int:
+    return x * x
+
+x = 10
+y = square(x)
+
+# Use macros
+log(y)              # prints value of y
+debug_type(y)       # prints type info of y
+list_globals()      # prints all globals
+
+
+
+# REFLECTION
+
+# Function to demonstrate runtime reflection
+function show_reflection():
+    # Get current function's name
+    print("📚 Function name:", reflect_func_name())
+    # Get current local variables
+    print("📦 Locals:", reflect_locals())
+ 
+show_reflection()

@@ -9,6 +9,7 @@ import math
 import time as _time
 import numpy as _np
 import math as _math
+import copy
 
 # Optional PyTorch for acceleration/autodiff
 try:
@@ -22,6 +23,7 @@ start: stmt*
 ?stmt: var_assign
      | temporal_decl
      | func_def
+     | macro_def
      | return_stmt
      | expr_stmt
      | go_stmt
@@ -39,6 +41,8 @@ param: NAME (":" TYPE)?
 return_type: "->" TYPE
 
 block: "{" stmt* "}"
+
+macro_def: "macro" NAME "(" params? ")" ":" block
 
 temporal_decl: "temporal" NAME "=" expr time_spec?
 
@@ -451,6 +455,12 @@ class TypeChecker:
             "ml.tensor": {"param_types": ["auto"], "return_type": "auto"},
             "ml.linear_regression_train": {"param_types": ["auto", "auto"], "return_type": "auto"},
             "tensor": {"param_types": ["auto"], "return_type": "auto"},
+            # reflection helpers (exposed at runtime as well)
+            "reflect_type": {"param_types": ["auto"], "return_type": "auto"},
+            "reflect_globals": {"param_types": [], "return_type": "auto"},
+            "reflect_func_name": {"param_types": [], "return_type": "auto"},
+            "reflect_locals": {"param_types": [], "return_type": "auto"},
+            # reflect.macros and reflect.* dotted calls will be handled conservatively as dotted names
         }
 
     # Top-level check
@@ -894,7 +904,6 @@ class MLModule:
         # ensure 2D X
         if X_np.ndim == 1:
             X_np = X_np.reshape(-1, 1)
-
         if _torch is not None:
             # Torch path: convert to tensors (float), enable grad for params
             X_t = _torch.tensor(X_np, dtype=_torch.float32)
@@ -948,7 +957,65 @@ def resolve_dotted(name: str, env: Environment):
     return obj
 
 
+
+# Reflection runtime object
+
+class Reflect:
+    """
+    Runtime reflection API exposed as 'reflect' in the global environment.
+    Methods:
+      - vars(env=None) -> list of (name, value)
+      - functions(env=None) -> list of (name, signature-info)
+      - timeline() -> dict with current_time and scheduled times
+      - inspect(name, env=None) -> dict with details about a symbol
+      - macros() -> list of macro names (compile-time info) [read-only]
+    """
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+
+    def vars(self, env=None):
+        e = env or self.interpreter.global_env
+        out = []
+        cur = e
+        seen = set()
+        while cur:
+            for k, v in cur.vars.items():
+                if k not in seen:
+                    seen.add(k)
+                    out.append((k, v))
+            cur = cur.parent
+        return out
+
+    def functions(self, env=None):
+        e = env or self.interpreter.global_env
+        out = []
+        for k, v in e.vars.items():
+            if isinstance(v, Function):
+                out.append((k, {"params": v.params, "param_types": v.param_types, "return_type": v.return_type}))
+        return out
+
+    def timeline(self):
+        return {"current_time": self.interpreter.timeline.current_time, "scheduled": self.interpreter.timeline.times()}
+
+    def inspect(self, name, env=None):
+        e = env or self.interpreter.global_env
+        try:
+            val = e.get(name)
+        except NameError as ex:
+            return {"found": False, "error": str(ex)}
+        if isinstance(val, TemporalVar):
+            return {"found": True, "type": "TemporalVar", "history": val.history()}
+        if isinstance(val, Function):
+            return {"found": True, "type": "Function", "params": val.params, "param_types": val.param_types, "return_type": val.return_type}
+        return {"found": True, "type": type(val).__name__, "value": val}
+
+    def macros(self):
+        """Return compile-time macro names collected during parse/compile."""
+        return list(self.interpreter.macros.keys())
+
+
 # Interpreter (runtime)
+
 class Interpreter:
     def __init__(self):
         self.parser = Lark(chronos_grammar, parser="lalr", propagate_positions=True)
@@ -971,8 +1038,65 @@ class Interpreter:
         # timeline for temporal variables
         self.timeline = Timeline()
 
+        # macros: name -> {"params": [...], "body": Tree}
+        self.macros = {}
+
+        # track currently executing function and its local environment (for reflection)
+        self._current_function = None
+        self._current_env = None
+
+        # reflection object (populate after Interpreter created)
+        self._reflect = Reflect(self)
+        self.global_env.set("reflect", self._reflect)
+
+        # --- Reflection helper functions exposed to Chronos code ---
+        # return a string describing the runtime type (simple Chronos-style names)
+        def _reflect_type(value):
+            if isinstance(value, int):
+                return "int"
+            if isinstance(value, float):
+                return "float"
+            if isinstance(value, str):
+                return "string"
+            if isinstance(value, Channel):
+                return f"chan<{value.elem_type}>" if value.elem_type else "chan"
+            if isinstance(value, TemporalVar):
+                return "temporal"
+            if isinstance(value, Function):
+                return "function"
+            # numpy / tensor wrappers
+            try:
+                import numpy as _np_local
+                if isinstance(value, _np_local.ndarray):
+                    return "array"
+            except Exception:
+                pass
+            # fallback: Python type name
+            return type(value).__name__
+
+        # list of global names (deduplicated)
+        def _reflect_globals():
+            return list(self.global_env.vars.keys())
+
+        # current executing function name (or None)
+        def _reflect_func_name():
+            return self._current_function
+
+        # shallow copy of locals for the currently executing function, if any
+        def _reflect_locals():
+            if self._current_env is None:
+                return {}
+            return dict(self._current_env.vars)
+
+        # expose them into the global environment so macros and runtime code can call them
+        self.global_env.set("reflect_type", _reflect_type)
+        self.global_env.set("reflect_globals", _reflect_globals)
+        self.global_env.set("reflect_func_name", _reflect_func_name)
+        self.global_env.set("reflect_locals", _reflect_locals)
+
     def run(self, src: str, skip_typecheck: bool = False, permissive: bool = False,
-            infer: bool = False, execute: bool = True, run_tests: bool = False, time_travel: bool = False):
+            infer: bool = False, execute: bool = True, run_tests: bool = False, time_travel: bool = False,
+            dump_expanded: bool = False):
         """
         Parse, optionally type-check, optionally execute, optionally run tests.
         - execute=False: only type-check (used by `build`).
@@ -981,6 +1105,29 @@ class Interpreter:
         """
         src2 = preprocess_indent(src)
         tree = self.parser.parse(src2)
+
+        # ---- Macros: collect and expand before typechecking/execution ----
+        # collect macro definitions and remove them from the AST (they are compile-time only)
+        self.collect_macros(tree)
+        # perform macro expansion pass (simple, conservative)
+        self.macro_expand_top_level(tree)
+        if dump_expanded:
+            # pretty-print the expanded tree in a simple linearized form for debugging:
+            try:
+                from lark import Tree as LarkTree
+                def node_to_str(n):
+                    if isinstance(n, Token):
+                        return n.value
+                    if isinstance(n, Tree):
+                        return f"({n.data} {' '.join(node_to_str(c) for c in n.children)})"
+                    return str(n)
+                print("=== Expanded AST (linearized) ===")
+                for c in tree.children:
+                    print(node_to_str(c))
+                print("=== End expanded AST ===")
+            except Exception:
+                pass
+        
 
         # static check
         if not skip_typecheck:
@@ -1031,6 +1178,159 @@ class Interpreter:
 
         # nothing else to do (build-only)
         return None
+
+    
+    # Macro collection / expansion
+    
+    def collect_macros(self, tree: Tree):
+        """
+        Find macro_def nodes in top-level children and record them in self.macros.
+        Remove macro_def nodes from the AST (macros are compile-time only).
+        Macro representation: {"params": [names], "body": block Tree}
+        """
+        new_children = []
+        for node in tree.children:
+            if isinstance(node, Tree) and node.data == "macro_def":
+                name_tok = node.children[0]
+                params = []
+                body = None
+                for c in node.children[1:]:
+                    if isinstance(c, Tree) and c.data == "params":
+                        for p in c.children:
+                            names = extract_name_tokens(p)
+                            if names:
+                                params.append(names[0])
+                    elif isinstance(c, Tree) and c.data == "block":
+                        body = c
+                self.macros[get_name(name_tok)] = {"params": params, "body": body}
+                # macros are compile-time only -> do not keep in AST
+            else:
+                new_children.append(node)
+        tree.children = new_children
+
+    def deep_copy_node(self, node):
+        """Deep copy an AST node (Tree or Token) using copy.deepcopy for safety."""
+        return copy.deepcopy(node)
+
+    def substitute_params_into_node(self, node, mapping):
+        """
+        Walk a Tree or Token and replace occurrences of:
+          - var(NAME) nodes whose NAME matches mapping keys, and
+          - NAME tokens whose value matches mapping keys
+        with the corresponding AST node from mapping.
+
+        mapping values should be AST nodes (Tree or Token). We deepcopy replacements
+        to avoid mutating the original call-site/param nodes.
+        """
+        # Token leaf: if it's a NAME that matches a param, replace with mapped node (deep-copied).
+        if isinstance(node, Token):
+            if node.type == 'NAME' and node.value in mapping:
+                return self.deep_copy_node(mapping[node.value])
+            # otherwise return a copy of the token
+            return Token(node.type, node.value)
+
+        if isinstance(node, Tree):
+            # special-case: (var (NAME foo)) -> substitute whole var node
+            if node.data == 'var' and len(node.children) == 1:
+                child = node.children[0]
+                if isinstance(child, Token) and child.type == 'NAME' and child.value in mapping:
+                    return self.deep_copy_node(mapping[child.value])
+
+            # otherwise recursively substitute inside children
+            new_children = []
+            for c in node.children:
+                new_children.append(self.substitute_params_into_node(c, mapping))
+            node.children = new_children
+            return node
+
+        # fallback (shouldn't happen)
+        return node
+
+
+    def expand_macros_recursive(self, node):
+        """
+        Recursively expand macro calls inside a node. This function does NOT handle splicing
+        statement lists for expansions that produce multiple statements; higher-level helpers
+        (macro_expand_top_level) handle top-level splicing.
+        Returns the possibly-modified node.
+        """
+        if isinstance(node, Token):
+            return node
+        if not isinstance(node, Tree):
+            return node
+
+        # If this is a func_call and it's a macro and we're inside expression context,
+        # try to expand to a single expression (if macro body contains a single expression stmt).
+        if node.data == 'func_call':
+            name_tok = node.children[0]
+            fname = get_name(name_tok)
+            if fname in self.macros:
+                macro = self.macros[fname]
+                # collect argument AST nodes (raw AST nodes from call site)
+                args_nodes = []
+                if len(node.children) > 1:
+                    args_node = node.children[1]
+                    for c in args_node.children:
+                        args_nodes.append(c)
+                mapping = {}
+                for i, pname in enumerate(macro['params']):
+                    mapping[pname] = args_nodes[i] if i < len(args_nodes) else Token('NAME', 'None')
+                # copy macro body and attempt to produce a single expression if possible
+                body_copy = self.deep_copy_node(macro['body'])
+                # If macro body contains exactly one stmt and it's an expr_stmt, produce that expr
+                if len(body_copy.children) == 1:
+                    stmt0 = body_copy.children[0]
+                    # accept either expr_stmt or a bare func_call as expansion-to-expression
+                    if isinstance(stmt0, Tree) and stmt0.data == 'expr_stmt':
+                        inner = stmt0.children[0]
+                        expanded = self.substitute_params_into_node(inner, mapping)
+                        return expanded
+                # otherwise, cannot expand into an expression context; leave call as-is (will be spliced at top-level)
+                return node
+
+        # recurse into children normally
+        new_children = []
+        for c in node.children:
+            new_children.append(self.expand_macros_recursive(c))
+        node.children = new_children
+        return node
+
+    def macro_expand_top_level(self, tree: Tree):
+        """
+        Top-level macro expansion pass.
+        - Expand expr_stmt nodes that are func_call to macros into the macro body statements (splicing).
+        - Also recurse into other nodes to expand macros that can become expressions (when possible).
+        This conservative pass prevents complex splicing logic and is simple to reason about.
+        """
+        new_children = []
+        for node in tree.children:
+            # If node is an expr_stmt containing a func_call to a macro, expand to macro body statements
+            if isinstance(node, Tree) and node.data == 'expr_stmt':
+                inner = node.children[0]
+                if isinstance(inner, Tree) and inner.data == 'func_call':
+                    name_tok = inner.children[0]
+                    fname = get_name(name_tok)
+                    if fname in self.macros:
+                        macro = self.macros[fname]
+                        args_nodes = []
+                        if len(inner.children) > 1:
+                            for c in inner.children[1].children:
+                                args_nodes.append(c)
+                        mapping = {p: a for p, a in zip(macro['params'], args_nodes)}
+                        body_copy = self.deep_copy_node(macro['body'])
+                        for stmt in body_copy.children:
+                            # substitute params and add into new_children
+                            new_children.append(self.substitute_params_into_node(stmt, mapping))
+                        # skip adding original node (it's replaced)
+                        continue
+
+            # For non-top-level or non-spliceable positions, still attempt recursive expansion
+            node2 = self.expand_macros_recursive(node)
+            new_children.append(node2)
+
+        tree.children = new_children
+
+
 
     def _run_tests(self, test_nodes, module_env: Environment, permissive: bool):
         results = []
@@ -1459,15 +1759,23 @@ class Interpreter:
                     raise TypeError(f"Function '{func.name}': argument {i+1} expected {expected}, got {actual_type}")
 
         new_env = Environment(parent=func.env)
-        for i, name in enumerate(func.params):
+        for i, name in enumerate(func.params): 
             val = args[i] if i < len(args) else None
             new_env.set(name, val)
         try:
+            # set execution context for reflection helpers
+            self._current_function = func.name
+            self._current_env = new_env
+
             if func.body:
                 self.exec_block(func.body, new_env, permissive)
             return None
         except ReturnException as r:
             return r.value
+        finally:
+            # always clear execution context to avoid stale references
+            self._current_function = None
+            self._current_env = None
 
     def debug_repl(self, env: Environment):
         """
@@ -1542,7 +1850,9 @@ class Interpreter:
         print("Exiting debugger.")
 
 
+
 # CLI: build / run / test
+
 def main(argv):
     # legacy convenience: if first arg looks like a path (not a subcommand or a flag),
     # treat it as: run <path>
@@ -1559,6 +1869,7 @@ def main(argv):
     p_run.add_argument("--permissive", action="store_true")
     p_run.add_argument("--infer", action="store_true")
     p_run.add_argument("--time-travel", action="store_true", help="Enter time-travel debugger after running prelude")
+    p_run.add_argument("--dump-expanded", action="store_true", help="Print expanded AST after macro expansion")
 
     # test
     p_test = sub.add_parser("test", help="Run tests in a ChronosLang source file")
@@ -1594,7 +1905,8 @@ def main(argv):
         with open(path_to_open, "r", encoding="utf-8") as f:
             src = f.read()
         interp.run(src, skip_typecheck=args.skip_typecheck, permissive=args.permissive,
-                   infer=args.infer, execute=True, run_tests=False, time_travel=args.time_travel)
+                   infer=args.infer, execute=True, run_tests=False, time_travel=args.time_travel,
+                   dump_expanded=getattr(args, "dump_expanded", False))
         return
 
     if args.cmd == "test":
@@ -1647,7 +1959,7 @@ def main(argv):
             print("Build failed:", e)
             sys.exit(1)
         return
-
+ 
     # backward compatible single-file invocation: behave as 'run'
     # read path from legacy_path or default if not provided
     path = resolved_path(args) or "examples/hello.chronos"
@@ -1659,3 +1971,4 @@ def main(argv):
 
 if __name__ == '__main__':
     main(sys.argv[1:])
+ 
