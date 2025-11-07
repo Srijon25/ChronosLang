@@ -624,8 +624,10 @@ class TypeChecker:
             left = self._expr_type(node.children[0], local_types)
             right = self._expr_type(node.children[1], local_types)
             if left in {"int", "float"} and right in {"int", "float"}:
-                return "float" if "float" in (left, right) else "int"
-            if left == "auto" or right == "auto":
+                return "float" if ("float" in (left, right)) else "int"
+            if left == "auto" or right == "auto" or left == "unknown" or right == "unknown":
+                if node.data == 'add' and (left == "string" or right == "string"):
+                    return "string"
                 return "auto"
             if node.data == 'add' and left == "string" and right == "string":
                 return "string"
