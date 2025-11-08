@@ -1,0 +1,227 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ChronosLang — Web Runner</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 0; padding: 0; display:flex; height:100vh; }
+    main { display:flex; flex-direction: column; flex:1; gap:10px; padding:12px; }
+    textarea { width:100%; height:45vh; font-family: monospace; font-size:13px; padding:8px; box-sizing:border-box; }
+    #output { white-space: pre-wrap; background:#111; color:#eee; padding:10px; height:30vh; overflow:auto; font-family: monospace; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .left { flex:1; display:flex; gap:8px; align-items:center; }
+    label { font-size:13px; }
+    input[type=file] { font-size:13px; }
+    button { padding:8px 12px; font-size:14px; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="controls">
+    <div class="left">
+      <label>Filename: <input id="filename" value="example.chronos" /></label>
+      <label><input type="checkbox" id="permissive" /> permissive</label>
+      <label><input type="checkbox" id="skip_typecheck" /> skip-typecheck</label>
+      <label><input type="checkbox" id="infer" /> infer</label>
+      <label><input type="checkbox" id="dump_expanded" /> dump-expanded</label>
+    </div>
+    <div>
+      <input id="fileupload" type="file" accept=".chronos" />
+      <button id="runBtn">Run (paste)</button>
+      <button id="uploadBtn">Upload & Run</button>
+    </div>
+  </div>
+
+  <textarea id="editor" placeholder="// write ChronosLang code here...">
+macro log(expr):
+    print("🔍 [Macro Log] Value:", expr)
+
+function square(x: int) -> int:
+    return x * x
+
+x = 10
+y = square(x)
+log(y)
+  </textarea>
+
+  <div id="output">Output will appear here...</div>
+
+  <div class="controls" style="margin-top:8px; border-top:1px dashed #ddd; padding-top:8px;">
+    <div class="left">
+      <button id="startSessionBtn">Start Time-Travel Session</button>
+      <label><input type="checkbox" id="ui_permissive" checked> permissive</label>
+      <label><input type="checkbox" id="ui_infer"> infer</label>
+      <span id="sessionLabel" style="margin-left:12px; font-weight:600;"></span>
+    </div>
+    <div>
+      <button id="fwd1">Forward +1s</button>
+      <button id="back1">Back -1s</button>
+      <input id="inspectVar" placeholder="var name" style="width:120px" />
+      <button id="showVarBtn">Show</button>
+      <button id="histBtn">History</button>
+      <button id="timesBtn">Times</button>
+    </div>
+  </div>
+ 
+</main>
+
+<script>
+async function postJSON(url, obj) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(obj)});
+  return r.json();
+}
+
+async function postFormData(url, formData) {
+  const r = await fetch(url, {method:'POST', body: formData});
+  return r.json();
+}
+
+function getFlags() {
+  const flags = [];
+  if (document.getElementById('permissive').checked) flags.push("--permissive");
+  if (document.getElementById('skip_typecheck').checked) flags.push("--skip-typecheck");
+  if (document.getElementById('infer').checked) flags.push("--infer");
+  if (document.getElementById('dump_expanded').checked) flags.push("--dump-expanded");
+  return flags;
+}
+
+document.getElementById('runBtn').addEventListener('click', async () => {
+  const code = document.getElementById('editor').value;
+  const filename = document.getElementById('filename').value || "example.chronos";
+  const flags = getFlags();
+  const out = document.getElementById('output');
+  out.textContent = "Running...";
+  try {
+    const res = await postJSON('/run', {code, filename, flags});
+    let s = "";
+    if (res.timed_out) s += "[Timed out]\n";
+    s += "=== STDOUT ===\n" + (res.stdout || "") + "\n";
+    s += "=== STDERR ===\n" + (res.stderr || "") + "\n";
+    s += "=== RETURN CODE ===\n" + (res.returncode === null ? "null" : String(res.returncode)) + "\n";
+    out.textContent = s;
+  } catch (e) {
+    out.textContent = "Error contacting server: " + e;
+  }
+});
+
+document.getElementById('uploadBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('fileupload');
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert("Please pick a .chronos file to upload.");
+    return;
+  }
+  const file = fileInput.files[0];
+  const flags = getFlags().join(",");
+  const out = document.getElementById('output');
+  out.textContent = "Uploading and running...";
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('flags', flags);
+    const res = await postFormData('/upload', fd);
+    let s = "";
+    if (res.timed_out) s += "[Timed out]\n";
+    s += "=== STDOUT ===\n" + (res.stdout || "") + "\n";
+    s += "=== STDERR ===\n" + (res.stderr || "") + "\n";
+    s += "=== RETURN CODE ===\n" + (res.returncode === null ? "null" : String(res.returncode)) + "\n";
+    out.textContent = s;
+  } catch (e) {
+    out.textContent = "Error contacting server: " + e;
+  }
+});
+
+// simple example: load example file into editor when chosen
+document.getElementById('fileupload').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const txt = await f.text();
+  document.getElementById('editor').value = txt;
+  document.getElementById('filename').value = f.name;
+});
+</script>
+
+<script>
+
+let sessionId = null;
+function logMsg(s){
+  const out = document.getElementById('output');
+  out.textContent = `[${(new Date()).toLocaleTimeString()}] ${s}\n\n` + out.textContent;
+}
+
+document.getElementById('startSessionBtn').addEventListener('click', async () => {
+  const code = document.getElementById('editor').value;
+  if (!code.trim()) { alert("Paste code in the editor first"); return; }
+  const permissive = document.getElementById('ui_permissive').checked;
+  const infer = document.getElementById('ui_infer').checked;
+  const resp = await fetch('/start_session', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({code, permissive, infer})
+  });
+  const j = await resp.json();
+  if (!j.ok) {
+    logMsg("start_session failed: " + JSON.stringify(j));
+    return;
+  }
+  sessionId = j.session_id;
+  document.getElementById('sessionLabel').textContent = "session: " + sessionId;
+  logMsg("Session started: " + sessionId + " times=" + JSON.stringify(j.times));
+});
+
+async function sessionPost(path, formData){
+  if (!sessionId) { logMsg("no session"); return null; }
+  formData.append('session_id', sessionId);
+  const resp = await fetch(path, {method:'POST', body: formData});
+  return resp.json();
+}
+
+document.getElementById('fwd1').addEventListener('click', async () => {
+  if (!sessionId) { logMsg("no session"); return; }
+  const fd = new URLSearchParams();
+  fd.append('session_id', sessionId);
+  fd.append('seconds', '1');
+  const resp = await fetch('/step_forward', {method:'POST', body: fd});
+  const j = await resp.json();
+  logMsg("step_forward -> " + JSON.stringify(j));
+});
+
+document.getElementById('back1').addEventListener('click', async () => {
+  if (!sessionId) { logMsg("no session"); return; }
+  const fd = new URLSearchParams();
+  fd.append('session_id', sessionId);
+  fd.append('seconds', '1');
+  const resp = await fetch('/step_back', {method:'POST', body: fd});
+  const j = await resp.json();
+  logMsg("step_back -> " + JSON.stringify(j));
+});
+
+document.getElementById('showVarBtn').addEventListener('click', async () => {
+  const name = document.getElementById('inspectVar').value.trim();
+  if (!sessionId) { logMsg("no session"); return; }
+  if (!name) { alert("enter variable name"); return; }
+  const resp = await fetch(`/show?session_id=${sessionId}&name=${encodeURIComponent(name)}`);
+  const j = await resp.json();
+  logMsg("show " + name + " -> " + JSON.stringify(j));
+});
+
+document.getElementById('histBtn').addEventListener('click', async () => {
+  const name = document.getElementById('inspectVar').value.trim();
+  if (!sessionId) { logMsg("no session"); return; }
+  if (!name) { alert("enter variable name"); return; }
+  const resp = await fetch(`/history?session_id=${sessionId}&name=${encodeURIComponent(name)}`);
+  const j = await resp.json();
+  logMsg("history " + name + " -> " + JSON.stringify(j));
+});
+
+document.getElementById('timesBtn').addEventListener('click', async () => {
+  if (!sessionId) { logMsg("no session"); return; }
+  const resp = await fetch(`/times?session_id=${sessionId}`);
+  const j = await resp.json();
+  logMsg("times -> " + JSON.stringify(j));
+});
+
+</script>
+
+</body>  
+</html>
+ 
