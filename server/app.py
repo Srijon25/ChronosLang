@@ -11,11 +11,9 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-
 import traceback
 import json
 from fastapi import HTTPException
-
 
 app = FastAPI(title="ChronosLang Runner (safe)")
 
@@ -23,7 +21,6 @@ app = FastAPI(title="ChronosLang Runner (safe)")
 WEB_DIR = "web"
 if os.path.isdir(WEB_DIR):
     app.mount("/static", StaticFiles(directory=WEB_DIR, html=True), name="static")
-
 
 CHRONOS_INTERPRETER = os.path.abspath(os.path.join("chronos", "interpreter.py"))
 
@@ -33,11 +30,9 @@ PYTHON = sys.executable
 # Defaults
 DEFAULT_TIMEOUT = 20  # seconds
 
-  
 def ensure_interpreter_exists():
     if not os.path.isfile(CHRONOS_INTERPRETER):
         raise FileNotFoundError(f"Chronos interpreter not found at: {CHRONOS_INTERPRETER}")
-
 
 def run_interpreter_on_file(path: str, flags: Optional[list] = None, timeout: int = DEFAULT_TIMEOUT):
     """
@@ -62,10 +57,7 @@ def run_interpreter_on_file(path: str, flags: Optional[list] = None, timeout: in
     except FileNotFoundError as ex:
         return {"returncode": None, "stdout": "", "stderr": str(ex), "timed_out": False, "cmd": " ".join(cmd)}
 
-
-
 try:
-
     from chronos.interpreter import Interpreter, Environment, TemporalVar, Function  # type: ignore
     IN_PROCESS_AVAILABLE = True
 except Exception:
@@ -263,14 +255,8 @@ async def end_session(session_id: str = Form(...)):
         del SESSIONS[session_id]
     return {"ok": True}
 
-
 @app.post("/run")
 async def run_code(request: Request):
-    """
-    Accept either JSON or form:
-    JSON: { "code": "...", "filename": "example.chronos", "flags": ["--permissive"] }
-    Form (multipart): fields code, filename, flags (comma-separated)
-    """
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         body = await request.json()
@@ -304,13 +290,8 @@ async def run_code(request: Request):
         except Exception:
             pass
 
-
 @app.post("/upload")
 async def upload_and_run(file: UploadFile = File(...), flags: Optional[str] = Form(None)):
-    """
-    Upload a .chronos file and run it. Return stdout/stderr.
-    flags is optional comma-separated list of CLI flags (e.g. --permissive)
-    """
     tmpdir = tempfile.mkdtemp(prefix="chronos-upload-")
     try:
         save_path = os.path.join(tmpdir, file.filename)
@@ -330,15 +311,45 @@ async def upload_and_run(file: UploadFile = File(...), flags: Optional[str] = Fo
         except Exception:
             pass
 
+# --- NEW /run_test endpoint ---
+@app.post("/run_test")
+async def run_test(file: UploadFile = File(...)):
+    tmpdir = tempfile.mkdtemp(prefix="chronos-test-")
+    try:
+        save_path = os.path.join(tmpdir, file.filename)
+        with open(save_path, "wb") as out:
+            contents = await file.read()
+            out.write(contents)
+
+        cmd = [PYTHON, CHRONOS_INTERPRETER, "test", save_path]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT)
+
+        return JSONResponse({
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "cmd": " ".join(cmd)
+        })
+    except subprocess.TimeoutExpired as ex:
+        return JSONResponse({
+            "returncode": None,
+            "stdout": ex.stdout or "",
+            "stderr": (ex.stderr or "") + f"\n[Timed out after {DEFAULT_TIMEOUT}s]",
+            "timed_out": True,
+            "cmd": " ".join(cmd)
+        })
+    finally:
+        try:
+            shutil.rmtree(tmpdir)
+        except Exception:
+            pass
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "python": PYTHON, "interpreter_exists": os.path.isfile(CHRONOS_INTERPRETER)}
 
-
 @app.get("/", response_class=HTMLResponse)
 async def root_index():
-    # prefer web/index.html if web folder exists
     index_path = os.path.join(WEB_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
@@ -353,6 +364,4 @@ async def root_index():
 
 if __name__ == "__main__":
     import uvicorn
-
-    # When running directly for local dev: run uvicorn on this module
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)

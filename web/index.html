@@ -22,35 +22,25 @@
       <label>Filename: <input id="filename" value="example.chronos" /></label>
       <label><input type="checkbox" id="permissive" /> permissive</label>
       <label><input type="checkbox" id="skip_typecheck" /> skip-typecheck</label>
-      <label><input type="checkbox" id="infer" /> infer</label>
       <label><input type="checkbox" id="dump_expanded" /> dump-expanded</label>
     </div>
     <div>
       <input id="fileupload" type="file" accept=".chronos" />
       <button id="runBtn">Run (paste)</button>
       <button id="uploadBtn">Upload & Run</button>
+      <button id="uploadTestBtn">Upload & Run Test</button>
+      <button id="runTestBtn">Run Test (paste)</button>
     </div>
   </div>
 
-  <textarea id="editor" placeholder="// write ChronosLang code here...">
-macro log(expr):
-    print("🔍 [Macro Log] Value:", expr)
-
-function square(x: int) -> int:
-    return x * x
-
-x = 10
-y = square(x)
-log(y)
-  </textarea>
+  <textarea id="editor" placeholder="// write ChronosLang code here..."></textarea>
 
   <div id="output">Output will appear here...</div>
 
   <div class="controls" style="margin-top:8px; border-top:1px dashed #ddd; padding-top:8px;">
     <div class="left">
       <button id="startSessionBtn">Start Time-Travel Session</button>
-      <label><input type="checkbox" id="ui_permissive" checked> permissive</label>
-      <label><input type="checkbox" id="ui_infer"> infer</label>
+      <label><input type="checkbox" id="ui_permissive"> permissive</label>
       <span id="sessionLabel" style="margin-left:12px; font-weight:600;"></span>
     </div>
     <div>
@@ -80,7 +70,6 @@ function getFlags() {
   const flags = [];
   if (document.getElementById('permissive').checked) flags.push("--permissive");
   if (document.getElementById('skip_typecheck').checked) flags.push("--skip-typecheck");
-  if (document.getElementById('infer').checked) flags.push("--infer");
   if (document.getElementById('dump_expanded').checked) flags.push("--dump-expanded");
   return flags;
 }
@@ -130,7 +119,52 @@ document.getElementById('uploadBtn').addEventListener('click', async () => {
   }
 });
 
-// simple example: load example file into editor when chosen
+document.getElementById('uploadTestBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('fileupload');
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert("Please pick a .chronos test file to upload.");
+    return;
+  }
+  const file = fileInput.files[0];
+  const out = document.getElementById('output');
+  out.textContent = "Uploading and running test...";
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await postFormData('/run_test', fd);
+    let s = "";
+    if (res.timed_out) s += "[Timed out]\n";
+    s += "=== STDOUT ===\n" + (res.stdout || "") + "\n";
+    s += "=== STDERR ===\n" + (res.stderr || "") + "\n";
+    s += "=== RETURN CODE ===\n" + (res.returncode === null ? "null" : String(res.returncode)) + "\n";
+    out.textContent = s;
+  } catch (e) {
+    out.textContent = "Error contacting server: " + e;
+  }
+});
+
+// NEW: Run Test (paste)
+document.getElementById('runTestBtn').addEventListener('click', async () => {
+  const code = document.getElementById('editor').value;
+  if (!code.trim()) { alert("Paste test code in the editor first"); return; }
+  const tmpFile = new File([code], "tmp_test.chronos", {type: "text/plain"});
+  const out = document.getElementById('output');
+  out.textContent = "Running test (paste)...";
+  try {
+    const fd = new FormData();
+    fd.append('file', tmpFile);
+    const res = await postFormData('/run_test', fd);
+    let s = "";
+    if (res.timed_out) s += "[Timed out]\n";
+    s += "=== STDOUT ===\n" + (res.stdout || "") + "\n";
+    s += "=== STDERR ===\n" + (res.stderr || "") + "\n";
+    s += "=== RETURN CODE ===\n" + (res.returncode === null ? "null" : String(res.returncode)) + "\n";
+    out.textContent = s;
+  } catch (e) {
+    out.textContent = "Error contacting server: " + e;
+  }
+});
+
 document.getElementById('fileupload').addEventListener('change', async (ev) => {
   const f = ev.target.files[0];
   if (!f) return;
@@ -141,7 +175,6 @@ document.getElementById('fileupload').addEventListener('change', async (ev) => {
 </script>
 
 <script>
-
 let sessionId = null;
 function logMsg(s){
   const out = document.getElementById('output');
@@ -152,11 +185,10 @@ document.getElementById('startSessionBtn').addEventListener('click', async () =>
   const code = document.getElementById('editor').value;
   if (!code.trim()) { alert("Paste code in the editor first"); return; }
   const permissive = document.getElementById('ui_permissive').checked;
-  const infer = document.getElementById('ui_infer').checked;
   const resp = await fetch('/start_session', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({code, permissive, infer})
+    body: JSON.stringify({code, permissive})
   });
   const j = await resp.json();
   if (!j.ok) {
@@ -167,13 +199,6 @@ document.getElementById('startSessionBtn').addEventListener('click', async () =>
   document.getElementById('sessionLabel').textContent = "session: " + sessionId;
   logMsg("Session started: " + sessionId + " times=" + JSON.stringify(j.times));
 });
-
-async function sessionPost(path, formData){
-  if (!sessionId) { logMsg("no session"); return null; }
-  formData.append('session_id', sessionId);
-  const resp = await fetch(path, {method:'POST', body: formData});
-  return resp.json();
-}
 
 document.getElementById('fwd1').addEventListener('click', async () => {
   if (!sessionId) { logMsg("no session"); return; }
@@ -219,9 +244,7 @@ document.getElementById('timesBtn').addEventListener('click', async () => {
   const j = await resp.json();
   logMsg("times -> " + JSON.stringify(j));
 });
-
 </script>
 
 </body>  
 </html>
- 
