@@ -17,7 +17,7 @@ ChronosLang is a small, research-first language that centers on three interlocki
   reflect.* APIs let running programs inspect globals, functions, and temporal timelines.
 
 
-
+ 
 
 **Highlights & goals**
 
@@ -95,6 +95,24 @@ uvicorn server.app:app --reload --port 8000
 
 
 
+
+##### Demo Recordings
+
+#### Time-Travel Debugging GUI
+Watch the PyQt5 GUI in action: visualize timelines, step forward/backward, and inspect program state 
+dynamically.
+
+![Time-Travel Debugger Recording](docs/recordings/python_chronos_time_travel_debugger_gui.mp4)
+
+#### Web Runner
+Write, edit, and execute ChronosLang code directly in the browser using the FastAPI web runner, and run 
+example programs interactively.
+
+![ChronosLang Web Runner Full Recording](docs/recordings/ChronosLang_web_runner_full_demo.chronos.mp4)
+
+
+
+
 **Primary commands and flags:**
 
 run <file> — parse → macro-expand → (typecheck) → execute prelude.
@@ -103,7 +121,7 @@ test <path|dir> — run test "name": blocks in isolation.
 
 build <path> — type-check-only (no execution).
 
-**Flags:**
+**Flags:** 
 
 --permissive — relax strict type checking (recommended for demos).
 
@@ -140,7 +158,12 @@ ChronosLang/
 │   ├── tests_and_packages.chronos
 │   └── type_system.chronos
 │
-├── docs\screenshots
+├── docs
+│    ├──recordings
+│    │     ├── ChronosLang_web_runner_full_demo.chronos.mp4
+│    │     ├── python_chronos_time_travel_debugger_gui.mp4
+│    │
+│    │──screenshots
 │         ├── hello.chronos_output.png
 │         ├── macros_reflection.chronos_output.png
 │         ├── prob_coin.chronos_output.png
@@ -150,6 +173,7 @@ ChronosLang/
 │         ├── tests_and_packages.chronos_output.png
 │         ├── type_system_chronos_permissive_mode_output.png
 │         └── type_system_chronos_static_mode_output.png
+│
 │
 ├── server/
 │   ├── app.py                # FastAPI server
@@ -228,8 +252,8 @@ Example programs: examples/
 ● Inspect and modify agent/program state dynamically.
 
 ✅ Scrubs temporal histories | ❌ Cannot display macro expansions or reflection inside 
-active function 
-calls.
+active function calls.
+
 
 **Best Practices**
 
