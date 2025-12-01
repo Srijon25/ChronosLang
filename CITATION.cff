@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "ChronosLang"
+version: "1.0.0"
+date-released: 2025-12-01
+authors:
+  - family-names: Kumar Shill
+    given-names: Srijon
+    orcid: "https://orcid.org/0009-0001-6647-2743"
+    affiliation: Independent Researcher
+repository-code: "https://github.com/Srijon25/ChronosLang"
+url: "https://github.com/Srijon25/ChronosLang"
+license: "MIT"
+type: software
