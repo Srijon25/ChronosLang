@@ -375,7 +375,6 @@ Week 12 – Final Release & Publication
 
   ● Prepare README.md for public release.
   ● Publish the project on Zenodo to obtain a DOI.
-  ● Submit the full software package and documentation to JORS.
 
 
 
@@ -391,5 +390,3 @@ Please check the roadmap before submitting a pull request (PR).
 📜 License
 
 MIT License © 2025 Srijon Kumar Shill  
-
-
