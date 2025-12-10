@@ -15,8 +15,7 @@ tags:
   - PyQt5 GUI
   - FastAPI web runner
 authors:
-  - family-names: Kumar Shill
-    given-names: Srijon
+  - name: Srijon Kumar Shill
     orcid: 0009-0001-6647-2743
     affiliation: 1
 affiliations:
