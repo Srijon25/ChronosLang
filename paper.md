@@ -1,5 +1,5 @@
 ---
-title: "ChronosLang: A Python-inspired research programming language with native time-travel debugging, temporal variables, deterministic concurrency, compile-time macros, runtime reflection, static typing, built-in testing, and lightweight probabilistic/ML modules"
+title: "ChronosLang: A Python-inspired compact, experimental programming language with native time-travel debugging, temporal variables, deterministic concurrency, compile-time macros, runtime reflection, static typing, built-in testing, and lightweight probabilistic/ML modules"
 tags:
   - programming-language
   - ChronosLang
@@ -27,7 +27,7 @@ bibliography: paper.bib
 
 # Summary
 
-ChronosLang is a compact, Python-inspired research programming language [@VanRossum2009] and interpreter that makes **time, concurrency, and introspection** first-class concepts. It is built around three interlocking capabilities:
+ChronosLang is a compact, Python-inspired experimental programming language [@VanRossum2009] and interpreter that makes **time, concurrency, and introspection** first-class concepts. It is built around three interlocking capabilities:
 
 1. **Time-native programming.** Variables may be declared as *temporal* and carry a time-indexed history; assignments can be scheduled into the future (e.g., `x = 5 @ t+2s`), and a global `Timeline` object allows programs and tools to move forward and backward in logical time. Temporal variables integrate tightly with a command-line time-travel REPL and a PyQt5 debugging GUI [@PyQt5Guide2023].
 
@@ -43,31 +43,49 @@ ChronosLang further includes:
 - a **tensor/ML module** for small machine learning experiments related to modern deep learning concepts [@LeCun2015],
 - and two complementary tools: a **PyQt5 time-travel debugger GUI** and a **FastAPI-based web runner**.
 
-ChronosLang is open source (MIT license), intentionally compact, and designed for use as a **teaching language** and **research testbed** for temporal semantics, reversible debugging, concurrency, and language-integrated probabilistic/ML features.
+ChronosLang is open source (MIT license), intentionally compact, and designed for use as a **teaching 
+language** and **research testbed** for temporal semantics, reversible debugging, concurrency, and 
+language-integrated probabilistic/ML features.
 
 # Statement of need
 
-Students and researchers in programming languages, debugging, distributed systems, and AI often need **small, self-contained languages** that are easy to read, modify, and extend. Existing tools address only parts of this need:
+Students and researchers in programming languages, debugging, distributed systems, and AI often need **small, self-contained interpreters** that are easy to read, modify, and extend, so they can teach core ideas or prototype new semantics without the overhead of a large compiler/runtime. Existing ecosystems provide powerful components, but the specific combination needed for *temporal semantics + introspection + minimal concurrency + lightweight probabilistic/ML demos* is usually scattered across different tools:
 
-- General-purpose languages (e.g., Python or Julia) and libraries like NumPy or PyTorch support scientific computing and ML but do not treat **temporal semantics** or **timeline scrubbing** as first-class constructs [@VanRossum2009; @LeCun2015].
-- Time-travel debuggers and record/replay systems exist in some IDEs or low-level tools, but they are tightly coupled to specific runtimes and do not expose a **language-level temporal model** [@Zeller2002; @Berger2006].
-- Probabilistic programming frameworks such as Church [@Goodman2008] or Pyro embed probabilistic models into existing host languages rather than offering a compact language where probabilistic and temporal constructs coexist.
+- General-purpose languages (e.g., Python) and libraries (e.g., NumPy/PyTorch) support scientific computing and ML, but they do not provide a **language-level temporal state model** with scheduled assignments and timeline scrubbing as part of the language’s core syntax/semantics [@VanRossum2009; @LeCun2015].
+- Time-travel debugging and record/replay tools exist, but they are typically tied to a particular runtime and are harder to repurpose as a **teaching interpreter** where time-indexed state is an explicit, programmable concept [@Zeller2002; @Berger2006].
+- Probabilistic programming systems (e.g., Church) demonstrate compact modeling and inference ideas, but they do not aim to be a single, small interpreter that also includes temporal state, channels/goroutines, macros, and reflection for teaching and prototyping [@Goodman2008].
 
-As a result, instructors and researchers who want to demonstrate *temporal semantics*, *deterministic concurrency*, *macro systems*, and *probabilistic/ML reasoning* often require multiple unrelated tools, each with different runtime models and debugging capabilities. This increases cognitive overhead and obscures core ideas.
+ChronosLang addresses this gap by providing a compact language and Python interpreter built to support **teaching, demos, and small-scale experiments** in one place.
 
-ChronosLang provides a unified solution:
+## What ChronosLang provides (as implemented)
 
-- temporal variables and time-travel debugging are **part of the language**,  
-- concurrency uses a small, deterministic rendezvous-channel model [@Hoare1978; @Pike2012],  
-- macros and reflection are accessible and inspectable [@Kiczales1991],  
-- probabilistic and ML modules are built into the language [@Goodman2008; @LeCun2015],  
-- and the entire interpreter is small enough for students to understand and extend.
+- **Temporal variables and scheduled updates.** Programs can declare temporal state (`temporal x = ...`) and schedule future assignments using `@ t+Ns` (e.g., `x = 5 @ t+2s`). Temporal variables store a history of `(time, value)` pairs, and the runtime maintains an explicit logical `current_time`. Advancing logical time applies scheduled events in timestamp order; moving backward changes the time pointer and reads older values from stored history.
+- **Time-travel inspection (CLI + GUI).** ChronosLang includes a CLI debugger (`--time-travel`) with commands such as `forward`, `back`, `show`, and `history`, and a PyQt5 GUI prototype that runs a program’s prelude once and then supports slider-based timeline scrubbing and variable history viewing.
+- **Minimal concurrency for demonstrations.** The language supports `go` for background execution and unbuffered rendezvous channels (`make(chan T)`, `ch <- v`, `<-ch`) inspired by CSP/Go-style communication [@Hoare1978; @Pike2012]. The implementation is intentionally small (Python threads + a rendezvous `Channel`) so the mechanism is readable and suitable for classroom examples and short demos.
+- **Compile-time macros + runtime reflection.** ChronosLang supports compile-time macros (`macro name(...)`) implemented by collecting macro definitions and expanding macro calls before runtime. At runtime, a reflection object (`reflect`) plus helper functions (`reflect_type`, `reflect_globals`, `reflect_func_name`, `reflect_locals`) allow programs to inspect global names, function signatures, the current timeline state, and locals during function execution [@Kiczales1991].
+- **Built-in probabilistic and ML mini-modules.** The interpreter includes a lightweight `prob` module (uniform/normal/bernoulli/binomial + inference via importance sampling or Metropolis–Hastings) and an `ml` module providing a minimal tensor API and linear regression training. The ML implementation optionally uses PyTorch autodiff when available, otherwise it falls back to NumPy closed-form least squares [@Goodman2008; @LeCun2015].
 
-ChronosLang is ideal for:
+## How this helps educators (concrete classroom value)
 
-- **Educators** teaching interpreters, type systems, debugging, concurrency, or probabilistic reasoning.  
-- **Students** exploring implementation techniques by modifying a real interpreter.  
-- **Researchers** prototyping new semantic or debugging ideas quickly.
+ChronosLang is useful for educators because it is **small enough to fit into a course module** while still demonstrating multiple “real” language/runtime ideas end-to-end:
+
+- **Interpreter structure in one place:** parsing (Lark), a preprocessing step (indent → braces), AST evaluation, and a simple runtime environment. Students can understand and modify the interpreter without needing a full compiler toolchain.
+- **Temporal semantics as a teachable concept:** instructors can show how “time-indexed state” differs from ordinary variables by using `temporal` + `@ t+Ns`, then letting students inspect histories with `history x` or GUI scrubbing. This makes state evolution visible and reduces reliance on ad-hoc logging.
+- **Debugging concepts with an explicit model:** the CLI and GUI demonstrate how a timeline pointer and stored histories can support time-based inspection. This is a practical teaching artifact for debugging lectures and lab exercises.
+- **Concurrency basics without large frameworks:** `go` and rendezvous channels let instructors demonstrate message passing, synchronization, and deadlocks with tiny examples (producer/consumer). Because the primitives are minimal, examples stay short and readable.
+- **Meta-programming and introspection:** macros + reflection allow instructors to demonstrate compile-time transformation versus runtime inspection using one codebase and clear examples.
+
+## How this helps researchers (concrete research/prototyping value)
+
+ChronosLang is useful for researchers because it provides a **modifiable baseline runtime** where new ideas can be implemented quickly:
+
+- **Prototype temporal semantics and tooling:** researchers can extend the timeline model (event scheduling, different conflict rules, alternative history representations) and immediately test changes via the existing CLI and GUI timeline inspection.
+- **Experiment with language instrumentation:** compile-time macros enable AST-level rewriting for lightweight instrumentation or program transformations, while runtime reflection supports debugging/inspection utilities without external tooling.
+- **Rapid “concept demo” environment:** the built-in examples and minimal runtime make it suitable for producing small, reproducible demonstrations of semantics (temporal state, message passing, macro expansion, reflection outputs) in papers, talks, or lab prototypes.
+- **Lightweight probabilistic/ML demos in the same interpreter:** the `prob` and `ml` modules enable small examples where inference/training results can be stored, printed, and combined with other language features without embedding into a larger host framework.
+
+ChronosLang intentionally makes its limits explicit: “time travel” applies to **temporal variable histories driven by scheduled timeline events**, not to general reversal of all side effects or full replay of concurrent thread behavior. This keeps the implementation compact and readable while still enabling clear demonstrations of temporal semantics, inspection, and lightweight meta-programming.
+
 
 # System overview
 
