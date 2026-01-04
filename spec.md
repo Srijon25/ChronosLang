@@ -1,409 +1,197 @@
-###### ChronosLang — Language Specification & Developer Guide
+# ChronosLang — Language Specification & Developer Guide
 
-### Table of contents
+This document specifies the **ChronosLang** language surface syntax, the behavior of the reference interpreter, and the official tooling shipped in this repository.
 
-1. Introduction & Motivation
+---
 
-2. Quickstart (run & test)
+## Table of contents
 
-3. Language overview (core concepts)
+1. Introduction & motivation  
+2. Running the reference implementation 
+3. Language overview (core concepts)  
+4. Concrete syntax — examples and idioms  
+5. Formal grammar (EBNF & Lark)  
+6. Execution model & runtime components  
+7. CLI: run / test / build (flags & behavior)  
+8. Web runner (FastAPI) & browser UI  
+9. Time‑travel engine & debugging tools  
+10. Macros, macro expansion, and compile‑time behavior  
+11. Reflection API (runtime)  
+12. Probabilistic & ML modules  
+13. Interactive examples  
+14. Error messages & debugging tips  
 
-4. Concrete syntax — examples and idioms
+---
 
-5. Formal grammar (EBNF & Lark)
+## 1. Introduction & motivation
 
-6. Execution model & runtime components
+ChronosLang is a compact, experimental language and reference interpreter built around three interlocking capabilities:
 
-7. CLI: run / test / build (flags & behavior)
+- **Time‑native programming.** ChronosLang treats time as a first‑class concern: *temporal variables* keep a history, assignments can be scheduled for future logical times, and a global **Timeline** supports moving forward and backward through logical time. This enables reproducible time-based demos and practical “time‑travel” inspection of state.
 
-8. Web Runner (FastAPI) & Browser UI
+- **Lightweight concurrency.** ChronosLang includes minimal Go‑inspired primitives: `go` for background execution and unbuffered rendezvous channels (`make(chan int)`, `ch <- v`, `<- ch`). The goal is clarity and teachability rather than maximum performance. (Background work uses Python threads; thread interleavings are not deterministic.)
 
-9. Time-travel engine & debugger
+- **Compile‑time macros + runtime reflection.** ChronosLang supports compile‑time macros (AST-level expansion before execution) and a small runtime reflection API (`reflect.*`, `reflect_type`, `reflect_globals`, etc.). This makes it easy to prototype small language extensions, instrumentation, and self-inspection demos.
 
-10. Macros, macro expansion, and compile-time behavior
+### Why this project exists
 
-11. Reflection API (runtime)
+ChronosLang was designed as a *research‑first* and *teaching‑first* interpreter:
 
-12. Probabilistic & ML modules
+- to make temporal reasoning **visible** (value histories, scheduled updates, timeline scrubbing),
+- to keep concurrency **small and explainable** (rendezvous channels),
+- to enable meta-programming experiments **without** turning the runtime into a large system.
 
-13. Interactive Examples
+---
 
-14. Error messages, debugging tips
+## 2. Running the reference implementation
 
+This repository includes the reference interpreter (`chronos/interpreter.py`).
 
+For installation, dependencies, GUI/web setup, and full demo commands, see **README.md**.
 
+Minimal reproducibility commands:
 
+```bash
+# run the default example (examples/hello.chronos)
+python chronos/interpreter.py
 
-##### 1. Introduction & Motivation
+# run a specific file
+python chronos/interpreter.py examples/temporal_demo.chronos
 
+# enter the CLI time-travel REPL (after running the prelude)
+python chronos/interpreter.py examples/temporal_demo.chronos --time-travel
 
-ChronosLang is a compact, experimental programming language and interpreter built around three 
-interlocking research-first capabilities:
+# run tests
+python chronos/interpreter.py test examples/tests_and_packages.chronos
 
+# run Time‑travel debugger GUI (PyQt5)
+python chronos_time_travel_gui.py
 
-⬤ Time-native programming. ChronosLang makes time a first-class part of the language: variables can be 
-temporal (they carry a time-indexed history), assignments may be scheduled for future logical times, and 
-a global Timeline allows programs and tools to move forward and backward through logical time. This 
-enables reproducible time-based demos, exploratory “time-travel” debugging, and simple temporal 
-reasoning inside programs.
+---
 
-⬤ Lightweight concurrency. The language exposes simple concurrency primitives inspired by Go: go for 
-background execution and unbuffered rendezvous channels (make(chan), ch <- v, <- ch). These primitives 
-are intentionally minimal so concurrency behavior is easy to reason about and suitable for teaching and 
-small demo programs. (Note: background scheduling uses Python threads, so low-level scheduling order is 
-not guaranteed deterministic.)
+## 3. Language overview (core concepts)
 
-⬤ Compile-time macros + runtime reflection. ChronosLang supports compile-time macros for AST-level 
-transformations and a small runtime reflection API (reflect, reflect_type, reflect_globals, etc.) so 
-programs can introspect and reason about their own structure and state. Macros let you build small 
-language extensions and compile-time instrumentation without complicating the runtime semantics. Note: 
-macros are “hygienic” only to the extent of deep-copying AST nodes; there is no automatic alpha-renaming.
+ChronosLang is small by design. The reference interpreter provides:
 
-**Why I created ChronosLang**
+- **Functions** with Python‑like indentation blocks.
+- **A conservative static type checker** with optional permissive mode for demos.
+- **Channels + `go`** for lightweight concurrency.
+- **Temporal variables** and scheduled assignments for time-indexed state.
+- **Compile‑time macros** (expanded before execution).
+- **Runtime reflection** for inspecting the environment and timeline.
+- **Optional `prob.*` and `ml.*` modules** for probabilistic and ML demos.
 
-ChronosLang was designed to address a set of gaps I saw in research demos, teaching tools, and prototype 
-languages:
+### 3.1 Feature map (what to run)
 
-⬤ Make temporal reasoning simple and visible. Many systems let you schedule callbacks or log events, 
-but few treat variable histories and timeline scrubbing as first-class concepts. ChronosLang makes it 
-easy to express and inspect how values evolve over time, which is useful for debugging reactive systems, 
-teaching stateful algorithms, and prototyping time-aware AI agents.
+| Feature | Demo file | Typical command |
+|---|---|---|
+| Basics (functions, arithmetic) | `examples/hello.chronos` | `python chronos/interpreter.py examples/hello.chronos` |
+| Type checking + permissive mode | `examples/type_system.chronos` | `... type_system.chronos [--permissive]` |
+| Concurrency (go + channels) | `examples/producer_consumer.chronos` | `... producer_consumer.chronos` |
+| Temporal engine | `examples/temporal_demo.chronos` | `... temporal_demo.chronos --time-travel` |
+| Probabilistic module | `examples/prob_coin.chronos` | `... prob_coin.chronos` |
+| ML module | `examples/tensor_linear_regression.chronos` | `... tensor_linear_regression.chronos` |
+| Macros + reflection | `examples/macros_reflection.chronos` | `... macros_reflection.chronos --dump-expanded` |
+| Tests | `examples/tests_and_packages.chronos` | `python chronos/interpreter.py test ...` |
 
-⬤ Provide easy-to-understand concurrency for demos. Full-featured concurrency libraries are powerful 
-but noisy for short demos. The rendezvous channel + go model gives a compact concurrency core that’s 
-ideal for short, reproducible demonstrations and teaching concurrency concepts. (Thread timing is still 
-real-world, so examples are written to keep behavior simple and predictable.)
+---
 
-⬤ Enable language-level experiments with macros and reflection. For research into language extensions,   
-macros give transformation power and reflection gives insights into running systems — together they 
-lower the barrier to experimenting with meta-level features (e.g., instrumentation, lightweight DSLs, or 
-GPT-assisted code transforms).
+## 4. Concrete syntax — examples and idioms
 
+ChronosLang source is written with **indentation blocks**, but the reference implementation converts indentation into explicit `{ ... }` blocks during preprocessing before parsing (Section 5.2). Users write indentation; the braces are an internal parser representation.
 
+### 4.1 Functions & expressions
 
-
-
-##### 2. Quickstart (Run & Test)
-
-Step 0: Install Python & Clone Repository
-
-Install Python 3.13 (or compatible version) if not already installed:
-
-Download Python
-
-Ensure python (or python3) is in your PATH.
-
-Clone the repository:
-
-git clone https://github.com/Srijon25/ChronosLang.git
-cd ChronosLang
-
-Step 1: Create and Activate Virtual Environment
-# Create venv
-python -m venv venv
-
-# On Linux / Mac
-source venv/bin/activate
-
-# On Windows (PowerShell)
-.\venv\Scripts\Activate.ps1
-
-
-⚠️ Windows note: If you see “execution of scripts is disabled,” open PowerShell as Administrator and run:
-
-Set-ExecutionPolicy RemoteSigned
-
-
-Type Y to confirm, then re-run activation.
-
-step 2: pip install lark, numpy, pyqt5 (GUI), fastapi + uvicorn (web-runner), torch (ML acceleration).
-
-step 3: 
-
-Run default example file (examples/hello.chronos)
-
-REPL Command: python chronos/interpreter.py 
-Run other example files
-
-REPL Commands: python chronos/interpreter.py examples/type_system.chronos
-               python chronos/interpreter.py examples/type_system.chronos --permissive (optional)
-               python chronos/interpreter.py examples/producer_consumer.chronos
-               python chronos/interpreter.py examples/tests_and_packages.chronos
-               python chronos/interpreter.py test examples/tests_and_packages.chronos
-               python chronos/interpreter.py examples/temporal_demo.chronos
-               python chronos/interpreter.py examples/temporal_demo.chronos --time-travel
-               python chronos/interpreter.py examples/prob_coin.chronos
-               python chronos/interpreter.py examples/tensor_linear_regression.chronos
-               python chronos/interpreter.py examples/macros_reflection.chronos
-               python chronos/interpreter.py examples/macros_reflection.chronos --dump-expanded
-
-
-PyQt5 GUI (time-travel debugger prototype)
-
-REPL Command: python chronos_time_travel_gui.py 
-
-Web-runner (browser UI served by FastAPI)
-
-REPL Command: uvicorn server.app:app --reload --port 8000
-# then open the local URL and use the web editor
-
-
-
-
-
-##### 3. Language overview (core concepts)
-
-ChronosLang is a small, research-first language and interpreter that puts time, concurrency, and 
-introspection at the center. It supports temporal variables with scheduled assignments and time-travel 
-inspection, goroutine-style concurrency with rendezvous channels, compile-time macros, and runtime 
-reflection — all implemented in a compact, teachable interpreter.
-
-**Core features (by week) — what was added and where to find the demo**
-
-Week 1 — Core interpreter
-
-What: Basic interpreter with parsing, functions, arithmetic, print().
-
-Demo file: examples/hello.chronos
-
-Example: function add(a, b): return a + b → print(add(5,6))
-
-Week 2 — Static type system + inference
-
-What: Conservative TypeChecker with optional --permissive mode exists for lenient testing.
-
-Demo file: examples/type_system.chronos
-
-Notes: Type inference helps document function contracts; permissive mode can be used in the web demo to 
-avoid breaking on type mismatches during exploration.
-
-Week 3 — Concurrency
-
-What: go for background execution, unbuffered rendezvous Channel (make(chan TYPE)), ch <- val, <- ch.
-
-Demo file: examples/producer_consumer.chronos
-
-Example: worker/producer-consumer patterns.
-
-Week 4 — Test & package skeleton
-
-What: run, test, build CLI subcommands; embedded test blocks test "..." with assert.
-
-Demo file: examples/tests_and_packages.chronos
-
-Usage: python chronos/interpreter.py test examples
-
-Week 5 — Temporal engine & time travel
-
-What: temporal variables, scheduled assignments x = 5 @ t+2s, Timeline with run_to, step_forward, 
-step_backward.
-
-Demo file: examples/temporal_demo.chronos
-
-Usage: python chronos/interpreter.py examples/temporal_demo.chronos --time-travel
-
-Week 6 — Probabilistic core
-
-What: Lightweight distributions (Uniform, Normal, Bernoulli), prob.* API, importance sampling & MH 
-backends.
-
-Demo file: examples/prob_coin.chronos
-
-Example: posterior = prob.infer(theta, [obs], "importance", 5000)
-
-Week 7 — ML core
-
-What: tensor wrapper, optional PyTorch backend, ml.linear_regression_train (autodiff if torch present, 
-closed-form fallback).
-
-Demo file: examples/tensor_linear_regression.chronos
-
-Notes: Interface returns native arrays/tensors; demo shows training, prediction, loss.
-
-Week 8 — Time-travel GUI (PyQt5 prototype)
-
-What: chronos_time_travel_gui.py — slider, play/pause, variable list, variable history view. Loads 
-prelude, schedules and lets user scrub timeline.
-
-Limitation: GUI shows runtime temporal variables and their history but does not support macro expansion 
-(macros are compile-time), and reflection values that require current-execution context are not 
-available in the GUI prelude/scrub model.
-
-Note for web UI: GUI logic inspired the browser runner but PyQt is separate; browser UI uses FastAPI 
-endpoints.
-
-Week 9 — Macros & Reflection
-
-What: Compile-time macro definitions (collected and expanded before runtime), and reflect runtime object 
-exposing:
-
-reflect.vars(), reflect.functions(), reflect.timeline(), reflect.inspect(name), reflect.macros().
-
-Demo file: examples/macros_reflection.chronos
-
-Important: Macros are removed from runtime AST (compile-time only) — that’s why time-travel GUI can’t 
-“execute” macro expansion live as a runtime event. Reflection inspects runtime environment; some 
-reflection results depend on execution context (e.g., current function locals) and thus are best shown 
-in CLI runs rather than the GUI prelude snapshot.
-
-Week 10 — Web runner & Browser UI (FastAPI + index.html)
-
-What: FastAPI endpoints /run and /upload (run a .chronos file or code snippet), simple browser editor at 
-web/index.html.
-
-Files: server/app.py and web/index.html
-
-
-
-
-
-##### 4. Concrete syntax — examples and idioms
-
-ChronosLang syntax is designed to be compact, explicit, and readable. Below are canonical examples 
-illustrating each core concept.
-
-4.1 Functions & Expressions
-# Define a function
+```chronos
 function add(a: int, b: int) -> int:
     return a + b
 
-# Type inference allows omission of types
 function auto_add(a, b):
     return a + b
 
-# Call a function
 print(add(5, 6))
 print(auto_add("hi", " world"))
+```
 
+Notes:
+- `return` is required to produce a value from a function.
+- Type annotations are optional; omitted types behave like `auto` in the type checker.
 
-Key points:
+### 4.2 Variables & temporal variables
 
-    ● Indentation-based blocks (like Python)
-
-    ● return mandatory to return a value
-
-    ● Functions may optionally have type annotations
-
-    ● Supports arithmetic, comparisons, lists, function calls
-
-Demo: examples/hello.chronos, examples/type_system.chronos
-
-4.2 Variables & Temporal Variables
-# Normal variable
+```chronos
 x = 42
 
-# Temporal variable
 temporal y = 10
-
-# Scheduled assignment in future
 y = 20 @ t+3s
 
-# Access current value
 print(y)
+```
 
+Notes:
+- `temporal` introduces a **TemporalVar** whose value can be queried at different logical times.
+- `@ t+Ns` schedules an assignment **relative** to the current logical time (seconds; fractions are allowed, e.g., `t+0.5s`).
 
-Key points:
+### 4.3 Concurrency — `go` and channels
 
-    ● temporal creates a time-aware variable
-
-    ● Scheduled updates @ t+Ns are applied by the Timeline
-
-    ● CLI --time-travel allows scrubbing past/future states
-
-    ● Temporal vars work only for runtime state, macros are compile-time and not shown in timeline
-
-Demo: examples/temporal_demo.chronos
-
-4.3 Concurrency — Goroutines & Channels
+```chronos
 function worker(ch):
-    data = <-ch        # receive
-    ch <- data * 2     # send
+    data = <-ch
+    ch <- data * 2
 
 ch = make(chan int)
-go worker(ch)          # spawn background worker
+go worker(ch)
 
-ch <- 42               # send
-print(<-ch)            # receive result
+ch <- 42
+print(<-ch)
+```
 
+Notes:
+- Channels are **unbuffered rendezvous** channels: send blocks until a receiver is ready.
+- `go` spawns a background thread. Thread scheduling is not deterministic.
 
-Key points:
+### 4.4 Macros (compile‑time)
 
-    ● go spawns a concurrent execution
-
-    ● Channels are unbuffered rendezvous channels
-
-    ● Use <- ch to receive, ch <- value to send
-
-    ● Examples are written to be predictable; actual scheduling uses Python threads
-
-Demo: examples/producer_consumer.chronos
-
-4.4 Macros
-# Compile-time macro
+```chronos
 macro log(expr):
-    print("🔍 [Macro Log] Value:", expr)
-
-macro debug_type(expr):
-    print("🧠 [Type Info] Type:", reflect_type(expr))
-
-macro list_globals():
-    print("🌐 Globals:", reflect_globals())
+    print("value:", expr)
 
 x = 10
 log(x)
-debug_type(x)
-list_globals()
+```
 
+Notes:
+- Macros expand **before** runtime execution.
+- Macro definitions are removed from the runtime AST after expansion.
 
-Key points:
+### 4.5 Reflection (runtime)
 
-    ●  Macros are expanded at compile-time
-
-    ●  Do not exist in runtime AST → not shown in time-travel GUI
-
-    ●  Useful for code generation, logging, debugging
-
-    ●  can take parameters and inline arbitrary ChronosLang code
-
-Demo: examples/macros_reflection.chronos
-
-4.5 Reflection
+```chronos
 function show_reflection():
-    print("Function name:", reflect_func_name())
-    print("Locals:", reflect_locals())
-    print("Timeline:", reflect.timeline())
-    print("Inspect 'x':", reflect.inspect("x"))
+    print("func:", reflect_func_name())
+    print("locals:", reflect_locals())
+    print("timeline:", reflect.timeline())
+    print("inspect x:", reflect.inspect("x"))
 
 show_reflection()
+```
 
+Notes:
+- Reflection inspects runtime environment and timeline.
+- Some information (like locals) only exists while a function is executing.
 
-Key points:
+### 4.6 Probabilistic programming
 
-    ● Access runtime environment: functions, variables, temporal state
-
-    ● Some reflection values depend on the execution context (inside a function call)
-
-
-Demo: examples/macros_reflection.chronos
-
-4.6 Probabilistic Programming
+```chronos
 theta = prob.uniform(0.0, 1.0)
 obs = prob.binomial(theta, 10, 7)
 posterior = prob.infer(theta, [obs], "importance", 5000)
 print("Posterior mean:", posterior.mean())
+```
 
+### 4.7 ML / tensor example
 
-Key points:
-
-    ● prob.* API: Uniform, Bernoulli, Normal
-
-    ● Supports simple inference backends (importance sampling, MCMC)
-
-    ● Integration with temporal variables and functions is seamless
-
-Demo: examples/prob_coin.chronos
-
-4.7 Machine Learning / Tensor Examples
+```chronos
 X = tensor([[1.0], [2.0], [3.0]])
 y = tensor([[2.0], [4.0], [6.0]])
 
@@ -411,56 +199,20 @@ w, b = ml.linear_regression_train(X, y, 500, 0.01)
 
 y_pred = ml.add(ml.matmul(X, w), b)
 loss = ml.mse_loss(y_pred, y)
-print("Prediction:", y_pred, "Loss:", loss)
+print("Loss:", loss)
+```
 
+---
 
-Key points:
+## 5. Formal grammar (EBNF & Lark)
 
-    ● Optional PyTorch backend; fallback to NumPy if unavailable
+ChronosLang is parsed by **Lark** using a compact grammar. User-written indentation is converted to `{ ... }` blocks before parsing (Section 5.2).
 
-    ● Supports tensor operations, linear regression, MSE loss, autodiff (if torch present)
+### 5.1 Core grammar (EBNF-style)
 
-Demo: examples/tensor_linear_regression.chronos
+The following is aligned with the grammar embedded in `chronos/interpreter.py`:
 
-4.8 Idioms / Best Practices
-
-    ● Prelude separation for GUI: code before tests or main functions can be executed in time-travel 
-      GUI.
-
-    ● Temporal updates: schedule updates relative to t+Ns or absolute times for reproducible 
-      experiments.
-
-    ● Use --permissive in demos: avoids runtime TypeErrors, ensures smooth execution in web runner.
-
-    ● Macro placement: define macros at top of file to ensure proper compile-time expansion.
-
-
-**Reviewer Note — Time-Travel GUI**
-
-The time-travel debugger can:
-
-✅ Scrub temporal variable histories
-❌ Cannot display macro expansions
-❌ Cannot display reflection values that depend on active function calls
-
-This is expected and consistent with the design:
-
- ● Macros = compile-time
-
- ● Reflection = runtime call-frame
-
- ● Temporal = timeline state
-
-
-
-
-
-##### 5. Formal grammar (EBNF & Lark)
-
-ChronosLang syntax is defined with a context-free grammar (EBNF style) and implemented using Lark. The 
-following describes the grammar and preprocessor rules.
-
-**5.1 Core Grammar (EBNF)**
+```ebnf
 start         ::= stmt*
 
 stmt          ::= var_assign
@@ -473,7 +225,6 @@ stmt          ::= var_assign
                 | test_def
                 | assert_stmt
 
-// Function definitions
 dotted_name   ::= NAME ("." NAME)*
 func_call     ::= dotted_name "(" args? ")"
 args          ::= expr ("," expr)*
@@ -487,7 +238,6 @@ block         ::= "{" stmt* "}"
 
 macro_def     ::= "macro" NAME "(" params? ")" ":" block
 
-// Variable assignments
 temporal_decl ::= "temporal" NAME "=" expr time_spec?
 assign_targets ::= NAME ("," NAME)*
 var_assign    ::= assign_targets "=" expr time_spec?
@@ -499,1547 +249,289 @@ go_stmt       ::= "go" expr
 test_def      ::= "test" STRING ":" block
 assert_stmt   ::= "assert" expr
 
-// Expressions
-expr          ::= comp
-comp          ::= comp "==" sum -> eq
-                | comp "!=" sum -> ne
-                | comp "<" sum  -> lt
-                | comp "<=" sum -> le
-                | comp ">" sum  -> gt
-                | comp ">=" sum -> ge
-                | sum
-
-sum           ::= sum "+" term -> add
-                | sum "-" term -> sub
-                | term
-
-term          ::= term "*" factor -> mul
-                | term "/" factor -> div
-                | factor
-
-factor        ::= NUMBER        -> number
-                | STRING        -> string
-                | list_literal
-                | func_call
-                | dotted_name   -> var
-                | "(" expr ")"
-                | send
-                | recv
-                | type_expr
-
 list_literal  ::= "[" [expr ("," expr)*] "]"
 
-send          ::= NAME "<-" expr   // channel send: ch <- value
-recv          ::= "<-" NAME        // channel receive: <- ch
+send          ::= NAME "<-" expr
+recv          ::= "<-" NAME
 
-type_expr     ::= "chan" TYPE       // channel type, e.g., chan int
-
-time_spec     ::= "@" "t" "+" NUMBER ("s")?  // scheduled assignment: @ t+2s
-
-
-Terminals:
-
-NAME          ::= /[a-zA-Z_][a-zA-Z0-9_]*/
-NUMBER        ::= /[+-]?[0-9]+(\.[0-9]+)?/
-STRING        ::= ESCAPED_STRING
-TYPE          ::= "int" | "float" | "string" | "auto"
-
-
-Ignored tokens:
-
-Whitespace: /[ \t\f\r\n]+/
-Comments:   /#[^\n]*/
-
-**5.2 Preprocessor: Indentation → Braces**
-
-ChronosLang uses Python-style indentation but converts blocks into explicit braces { … }:
-
-```python
-def preprocess_indent(src: str) -> str:
-    '''
-    Convert Python-style indentation to explicit { ... } blocks.
-    Minimal, intended for small demo programs.
-    '''
-    lines = src.splitlines()
-    out_lines = []
-    indent_stack = [0]
-
-    for i, raw in enumerate(lines):
-        if raw.strip() == "":
-            continue
-        stripped = raw.lstrip(" \t")
-        indent = len(raw) - len(stripped)
-
-        # Close blocks on dedent
-        while indent < indent_stack[-1]:
-            out_lines.append("}")
-            indent_stack.pop()
-
-        # Check if previous line ends with ":" → open block
-        j = i - 1
-        prev_raw = ""
-        while j >= 0:
-            if lines[j].strip() == "":
-                j -= 1
-                continue
-            prev_raw = lines[j]
-            break
-        prev_code = prev_raw.split("#", 1)[0].rstrip() if prev_raw else ""
-        if prev_code.endswith(":") and indent > indent_stack[-1]:
-            out_lines.append("{")
-            indent_stack.append(indent)
-
-        out_lines.append(stripped)
-
-    # Close remaining blocks
-    while len(indent_stack) > 1:
-        out_lines.append("}")
-        indent_stack.pop()
-
-    return "\n".join(out_lines)
+type_expr     ::= "chan" TYPE
+time_spec     ::= "@" "t" "+" NUMBER ("s")?
 ```
 
-Notes:
+Terminals:
+- `NAME`  = `/[a-zA-Z_][a-zA-Z0-9_]*/`
+- `NUMBER` = signed integer or float (e.g., `2`, `0.5`)
+- `STRING` = escaped string
 
-    ● Converts indentation-based code into brace-delimited blocks for the parser.
+### 5.2 Preprocessor: indentation → braces
 
-    ● Supports nested blocks, functions, macros, if/else (future expansion).
+The reference interpreter uses a small preprocessor to convert Python-style indentation into explicit braces for the parser. This is intentionally minimal and designed for short demo programs.
 
-    ● Minimalistic: intended for small example programs and research demos.
+(Implementation: `preprocess_indent()` in `chronos/interpreter.py`.)
 
-**5.3 Lark Parser Integration**
-from lark import Lark
+### 5.3 Parser integration
 
-parser = Lark(
-    chronos_grammar,
-    parser="lalr",
-    propagate_positions=True,
-)
+The parser is constructed as:
 
+```python
+parser = Lark(chronos_grammar, parser="lalr", propagate_positions=True)
+```
 
-propagate_positions=True preserves line/column information for debugging and error messages.
+`propagate_positions=True` preserves line/column info for useful errors.
 
-The parser consumes preprocessed source (preprocess_indent(src)).
+---
 
-Supports all language features, including:
+## 6. Execution model & runtime components
 
-    ● Functions, macros, reflection
+ChronosLang execution is a pipeline:
 
-    ● Temporal variables & scheduled assignments
+1. **Preprocess** indentation → braces  
+2. **Parse** into an AST  
+3. **Collect + expand macros** (compile‑time)  
+4. **Type check** (optional; can be skipped)  
+5. **Execute** prelude statements; optionally run tests; optionally enter CLI time‑travel REPL  
 
-    ● Concurrency primitives (go, make(chan), send/recv)
+### 6.1 Prelude vs tests
 
-    ● Tests and assertions
+- Top-level `test "...":` blocks are **not executed** during a normal run; they are executed only in **test mode** (`python chronos/interpreter.py test ...` or the web `/run_test` endpoint).
+- `assert <expr>` is a real statement and will raise `AssertionError` if false wherever it runs.
 
+### 6.2 Temporal runtime (Timeline + TemporalVar)
 
+- A **TemporalVar** stores a sorted history of values: `(time, value)` pairs.
+- The **Timeline** stores scheduled events and advances logical time with `run_to()` / stepping.
+- Rewinding time moves the **time pointer**; it does not “undo” I/O or reverse threads.
 
+### 6.3 Concurrency
 
+- `go f(...)` spawns a Python thread that calls the Chronos function `f`.
+- Channels are **unbuffered rendezvous** objects; send/receive are synchronized handoffs.
+- Concurrency is **not** time‑traveled. For deterministic “scrub‑able” demos, prefer temporal scheduling over threads.
 
-##### 6. Execution Model & Runtime Components
+### 6.4 Reflection
 
-ChronosLang executes programs through a layered architecture combining a static type checker, macro 
-expansion, temporal runtime, and optional probabilistic and ML modules. The model balances reproducible 
-temporal execution with lightweight concurrency and introspection, making it suitable for teaching, 
-demos, and prototyping.
+The global `reflect` object provides:
+- `reflect.vars()`, `reflect.functions()`
+- `reflect.timeline()`
+- `reflect.inspect(name)`
+- `reflect.macros()` (names only)
 
+Helper functions:
+- `reflect_type(x)`, `reflect_globals()`, `reflect_func_name()`, `reflect_locals()`
 
+---
 
-## 6.1 Execution Pipeline Overview
+## 7. CLI: run / test / build (flags & behavior)
 
-Every .chronos file passes through five main phases:
+### 7.1 Common patterns
 
-| Phase                  | Component                                                      | Description          |
-| **1. Preprocessing**   | `preprocess_indent()`                                          | Converts indentation-based syntax to brace-delimited blocks for the parser.  |
-| **2. Parsing**         | `lark.Lark(chronos_grammar)`                                   | Builds an Abstract Syntax Tree (AST) from the preprocessed source.  |
-| **3. Macro Expansion** | `Interpreter.collect_macros()` + macro expansion pass(es)       | Collects macro definitions, expands macro calls, and removes macro_def nodes from the runtime AST. |
-| **4. Type Checking**   | `TypeChecker`                                                  | Performs static type inference and validation; can run in strict or `--permissive` mode. |
-| **5. Execution**       | `Interpreter` + `Environment` + `Timeline` + `TemporalVar`      | Evaluates the (expanded) AST with temporal scheduling, concurrency, reflection, and module semantics. |
+Legacy form (common in docs and examples):
 
+```bash
+python chronos/interpreter.py <file>.chronos [flags...]
+```
 
-At runtime, the interpreter constructs an environment object (conceptually):
+Subcommand form:
 
-env = {
-    "globals": {},          # global vars, functions, temporal vars
-    "timeline": Timeline(), # central temporal state tracker
-    "reflect": Reflect(),   # reflection API
-}
+```bash
+python chronos/interpreter.py run <file>.chronos [flags...]
+python chronos/interpreter.py test <file-or-dir>
+python chronos/interpreter.py build <path>
+```
 
+### 7.2 Flags (public, recommended)
 
+- `--permissive`  
+  Continue past certain static/runtime type errors by downgrading them to warnings (better for demos and the web runner).
 
-## 6.2 Core Components
+- `--skip-typecheck`  
+  Skip static type checking entirely.
 
-**Temporal runtime (Timeline + TemporalVar)**
+- `--time-travel`  
+  After executing prelude statements, enter the **CLI time‑travel REPL** (timeline control + state inspection).
 
-● Responsible for managing temporal variables, scheduled assignments, and logical time progression.
+- `--dump-expanded`  
+  Print the AST after macro expansion (useful for explaining macros and debugging expansion).
 
-● Tracks each temporal variable’s timeline of states.
+> Note on `--infer`  
+> The codebase currently contains an `--infer` flag, but it is **not needed for normal use**, and it is intentionally omitted from the main user documentation here to keep the CLI simple.
 
-● Supports moving backward/forward in logical time and inspecting historical values.
+---
 
-● Interface CLI time-travel commands:
+## 8. Web runner (FastAPI) & browser UI
 
-    ► forward N → move time forward by N seconds.
+ChronosLang ships a FastAPI app in `server/app.py` and a simple browser UI in `web/index.html`.
 
-    ► back N → rewind logical time by N seconds (moves the time pointer).
+### 8.1 Two execution modes
 
-    ► show x, history x → inspect variable timeline.
+The server supports two distinct modes:
 
-Example timeline entry:
+1) **One‑shot runs (subprocess mode)**  
+   Endpoints like `/run` and `/upload` write code to a temp file and execute the interpreter in a subprocess. This is simple and returns `stdout/stderr/returncode`.
 
-    timeline = {
-    "x": [(0.0, 0), (2.0, 5), (5.0, 7)]
-}
+2) **Interactive time sessions (in‑process mode)**  
+   Endpoints like `/start_session` create an in‑process Interpreter + module environment and keep it in memory under a `session_id`. Then `/step_forward`, `/step_back`, `/show`, `/history`, `/times`, and `/call_function` operate on that live session.
 
-At t=0, x = 0 → updated to 5 at t=2 → 7 at t=5.
+### 8.2 Endpoints (as implemented)
 
-**Macro Engine**
+- `POST /run` — run code (JSON or form), subprocess mode
+- `POST /upload` — run uploaded `.chronos`, subprocess mode
+- `POST /run_test` — run tests in an uploaded `.chronos`, subprocess mode
+- `POST /start_session` — create a live in‑process session from code, returns `session_id`
+- `POST /step_forward` — advance session timeline by N seconds
+- `POST /step_back` — rewind session time pointer by N seconds
+- `GET /show` — show current value of a variable in a session
+- `GET /history` — show temporal history of a variable in a session
+- `GET /times` — list scheduled times in a session
+- `POST /call_function` — call a function in a session
+- `POST /end_session` — destroy session
+- `GET /health` — server health
+- `GET /` — serves the browser UI (if present)
 
-Executed before runtime.
+### 8.3 Security note (important)
 
-Macros are stored temporarily during AST collection and expanded recursively.
+Running user-provided code on a server is dangerous. The current web runner is suitable for **local demos**. For public hosting, you should sandbox execution (containers, resource limits, restricted filesystem/network, etc.).
 
-    ► No macro nodes remain in the final runtime AST.
+---
 
-    ► Expansion happens top-down and in order of definition.
+## 9. Time‑travel engine & debugging tools
 
-    ► Macros can include arbitrary ChronosLang code fragments.
+This section covers (A) the engine semantics and (B) the official interfaces.
 
-Special CLI flag:
+### 9.1 Engine semantics (language/runtime)
 
-   --dump-expanded   # shows post-expansion source / AST for debugging
+- `temporal x = v` creates a TemporalVar with a value history.
+- `x = v @ t+Ns` schedules an update at logical time `current_time + N`.
+- Advancing the timeline applies events in timestamp order.
+- Rewinding does not reverse I/O; it changes what value is *queried* at that time.
 
-Macros never appear in the time-travel GUI, since they exist only at compile-time (and the GUI runner
-does not run the macro expansion phase).
+### 9.2 CLI time‑travel REPL (`--time-travel`)
 
-**TypeChecker**
+When you run with `--time-travel`, the interpreter executes prelude code first, then enters a terminal REPL that lets you:
+- move time forward/back by a given delta,
+- inspect current values,
+- inspect full temporal histories.
 
-Handles both explicit and inferred types:
+This is a **CLI interface** to the time‑travel engine.
 
-    ► Supports int, float, string, auto, chan TYPE, and composite types (lists, tensors).
+### 9.3 Time‑travel debugger (GUI) — `chronos_time_travel_gui.py`
 
-    ► Permissive inference (--permissive) allows mixed operations for smoother demos.
+The PyQt5 tool is a **desktop visualizer/debugger**:
+- It parses the program and executes **prelude nodes** into an environment.
+- It displays temporal variable histories and lets you scrub time with a slider.
+- It does **not** perform compile-time macro expansion, so macro-dependent programs may not behave the same as in the CLI.
 
-    ► Static types are checked before runtime; runtime may still raise TypeError for invalid operations.
+### 9.4 Web time sessions
 
-**Concurrency Engine**
+The web session endpoints provide time travel via HTTP:
+- a session holds an interpreter + environment,
+- stepping endpoints call timeline operations,
+- show/history endpoints query the session state.
 
-Provides goroutine-style concurrency via Python threads and synchronized rendezvous channels.
+---
 
-    ► go expr spawns a background worker.
+## 10. Macros, macro expansion, and compile‑time behavior
 
-    ► Channels are rendezvous (unbuffered) objects implemented as a simple synchronized handoff.
+Macros are compile‑time AST transformations.
 
-    ► Communication blocks until sender and receiver meet.
+- Macro definitions are collected first and removed from the runtime AST.
+- Macro calls are expanded conservatively:
+  - top-level macro calls can splice multiple statements,
+  - some expression-position macros can expand to a single expression.
 
-    ► Goroutines run as daemon threads, so they exit when the main program ends.
+Use `--dump-expanded` to see the expanded AST.
 
-Example behavior:
+**Macro hygiene:** nodes are deep-copied, but there is no automatic alpha-renaming. Avoid accidental name capture.
 
-   ch = make(chan int)
-   go worker(ch)
-   ch <- 42
-   print(<-ch)
+---
 
-Note: thread timing is not time-traveled by the Timeline; use temporal scheduling for fully reproducible
-time-scrub demos.
+## 11. Reflection API (runtime)
 
-**Reflection System**
+ChronosLang exposes:
 
-The reflect object provides runtime introspection.
+- `reflect.vars(env=None)`  
+- `reflect.functions(env=None)`  
+- `reflect.timeline()`  
+- `reflect.inspect(name, env=None)`  
+- `reflect.macros()` (names only)
 
-Methods include:
+Helper functions:
+- `reflect_type(x)`
+- `reflect_globals()`
+- `reflect_func_name()`
+- `reflect_locals()`
 
-   reflect.vars()         # list all global variables
-   reflect.functions()    # list all functions
-   reflect.timeline()     # show temporal history summaries
-   reflect.inspect(name)  # inspect a variable’s current state
-   reflect_func_name()    # current function name
-   reflect_locals()       # current local variables
+Caveat: locals and current function name depend on the active call frame.
 
+---
 
-Limitations:
+## 12. Probabilistic & ML modules
 
-    ► Reflection inside goroutines may return partial local states.
+### 12.1 `prob.*`
 
-    ► Time-travel GUI shows only the temporal runtime state; compile-time macro expansion is not shown.
+`prob` provides lightweight distributions and inference helpers (importance sampling and MCMC-style methods). It is designed for clear toy demos (coin flips, binomial observations).
 
-**Probabilistic Core (prob.*)**
+### 12.2 `ml.*`
 
-Implements lightweight probabilistic programming:
+`ml` provides a minimal tensor API with an optional PyTorch backend. If PyTorch is available, training uses autodiff; otherwise it falls back to NumPy-based computations.
 
-    ► Distributions: uniform, bernoulli, normal, binomial
+A top-level convenience function `tensor(...)` is also available.
 
-    ► Inference methods: "importance", "mcmc"
+---
 
-    ► Posterior objects support .mean(), .credible_interval(p)
+## 13. Interactive examples
 
-For reproducible demos, seed randomness from the Python side before running (e.g., in the host process).
+Screenshots are stored under `docs/screenshots/`.
 
-**Machine Learning Core (ml.*)**
+- `examples/hello.chronos`  
+  ![hello output](docs/screenshots/hello.chronos_output.png)
 
-Wrapper around NumPy or PyTorch:
+- `examples/type_system.chronos`  
+  ![type_system static](docs/screenshots/type_system_chronos_static_mode_output.png)  
+  ![type_system permissive](docs/screenshots/type_system_chronos_permissive_mode_output.png)
 
-    ► Tensor creation: tensor([...])
+- `examples/producer_consumer.chronos`  
+  ![producer_consumer output](docs/screenshots/producer_consumer.chronos_output.png)
 
-    ► Operations: add, matmul, mse_loss
+- `examples/tests_and_packages.chronos`  
+  ![tests output](docs/screenshots/tests_and_packages.chronos_output.png)
 
-    ► Training helper: ml.linear_regression_train(X, y, steps, lr)
+- `examples/temporal_demo.chronos`  
+  ![temporal_demo output](docs/screenshots/temporal_demo.chronos_output.png)
 
-    ► Optional autodiff if torch backend available.
+- `examples/prob_coin.chronos`  
+  ![prob_coin output](docs/screenshots/prob_coin.chronos_output.png)
 
-Works seamlessly with the rest of the runtime — tensors can be stored in temporal variables or channels.
+- `examples/tensor_linear_regression.chronos`  
+  ![tensor LR output](docs/screenshots/tensor_linear_regression.chronos_output.png)
 
+- `examples/macros_reflection.chronos`  
+  ![macros_reflection output](docs/screenshots/macros_reflection.chronos_output.png)
 
+---
 
-## 6.3 Time-Travel Debugger & GUI Layer
+## 14. Error messages & debugging tips
 
-The ChronosLang GUI provides a simple but functional time-travel debugger that allows developers to load 
-a program, run it, and step through its execution timeline.
+### Parsing problems
+- Most parse errors come from indentation or missing `:` on block headers.
+- If needed, inspect the preprocessed braces form by printing `preprocess_indent(src)` in Python.
 
-What the GUI Actually Does
+### Name errors
+- Define variables/functions before use.
+- For temporal variables, declare `temporal x = ...` if you want a meaningful value at `t=0`.
 
-● Open a .chronos file
-  The “Open .chronos” button allows the user to browse their file system and select a ChronosLang source 
-  file.
+### Type issues
+- Use `--permissive` for demos to downgrade some errors to warnings.
+- Use `--skip-typecheck` for fastest experimentation (expect more runtime errors).
 
-● Run the program
-  After loading the file, clicking Run Prelude executes the prelude using the Interpreter backend and
-  schedules temporal events into the Timeline.
+### Macro confusion
+- Remember: macros are compile‑time.
+- Use `--dump-expanded` to show what the macro produced.
 
-● Display variable values
-  Once running, the GUI shows:
+### Time-travel expectations
+- Rewinding time does not undo prints or background threads.
+- For scrub-friendly demos, prefer scheduled assignments over thread timing.
 
-     ► all current variables
-
-     ► their latest values
-
-     ► temporal variables with their history
-
-● Play (time-travel playback)
-  When the user clicks play, the GUI:
-
-     ► advances logical time in small steps
-
-     ► applies scheduled timeline events
-
-     ► shows how temporal variables change over time
-
-This feature represents time debugging — you can move through earlier moments of execution and see the 
-temporal variable values exactly as they were then.
-
-⚠ Limitations (Important & Honest)
-
-macros_reflection.chronos does NOT work in the GUI.
-
-Why:
-
-● The GUI runner executes runtime prelude statements, but does not run compile-time macro expansion.
-
-● Reflection and macro expansion happen in the normal CLI compile/expand pipeline.
-
-● Since the GUI uses the simplified execution path:
-
-     ► macros are not expanded
-
-     ► reflection values that depend on active call frames are not visible
-
-     ► the file cannot run correctly inside the GUI if it relies on macro expansion
-
-
-
-## 6.4 Execution Semantics Summary
-
-| Feature                               | When evaluated                  | Recorded in timeline? | Shown in GUI? |
-| -------------------------------------| --------------------------------| ----------------------|---------------|
-| Normal variable (`x = 5`)            | Runtime (immediate)             | ❌                    | ✅ (current value) |
-| Temporal variable (`temporal x = 0`) | Runtime                         | ✅ (history stored)   | ✅ |
-| Scheduled assignment (`x = 5 @ t+2s`)| Deferred (Timeline scheduling)  | ✅                    | ✅ |
-| Macro (`macro log(x)`)               | Compile-time                    | ❌                    | ❌ |
-| Reflection (`reflect.vars()`)        | Runtime                         | ❌                    | Partially (module/global state) |
-| Goroutine / channel send/recv        | Runtime (threaded)              | ❌                    | Not time-traveled |
-| Probability / ML ops                 | Runtime                         | ❌                    | ✅ (values if stored in vars) |
-| Test/assert blocks                   | Runtime (test mode)             | ❌                    | Not in GUI |
-
-
-
-## 6.5 Thread Safety & Determinism
-
-ChronosLang prioritizes deterministic **temporal** replay:
-
-    ► Scheduled temporal events are applied in timestamp order.
-
-    ► Time-travel scrubbing reads stored TemporalVar history.
-
-Concurrency and probabilistic inference are runtime features and may vary with real thread timing and RNG
-state unless the host process is seeded and examples are written to avoid timing races.
-
-
-
-## 6.6 Error Handling
-
-    ► Type errors: raised before execution unless --permissive is active.
-
-    ► Runtime errors: caught, logged, and optionally displayed in GUI console.
-
-    ► Temporal conflicts: last scheduled assignment at same timestamp wins (documented deterministic 
-    rule).
-
-    ► Reflection errors: if variable not found, reflect.inspect(name) returns {"found": False, "error": "..."}.
-
-
-
-## 6.7 Integration Hooks
-
-● CLI Interface:
-
-python chronos/interpreter.py run file.chronos [--time-travel] [--permissive]
-
-
-● GUI Layer:
-Uses Interpreter + Timeline to execute the prelude and display temporal variable history.
-
-● Testing:
-test and assert nodes are executed after main body; failures reported but do not halt GUI unless strict 
-mode is enabled.
-
-✅ Summary
-
-The ChronosLang runtime is a temporal–reflective execution model integrating:
-
-    ► Compile-time macro expansion
-
-    ► Lightweight concurrency with rendezvous channels
-
-    ► Temporal scheduling and history-based time inspection
-
-    ► Optional probabilistic and ML subsystems
-
-    ► Visual debugging via the time-travel GUI
-
-Together, these components unify time, concurrency primitives, and reflection in a single interpreter
-designed for teaching, demos, and prototyping.
-
-
-
-
-
-##### 7. CLI: run / test / build (flags & behavior)
-
-This section documents the user-facing CLI you ship with chronos/interpreter.py and the meaning / 
-interactions of the flags you implemented.
-
-**Commands (summary)**
-
-    ► python chronos/interpreter.py run <path>
-       Parse → macro-expand → (optionally type-check) → execute prelude. By default executes prelude 
-       (top-level) nodes then exits.
-
-    ► python chronos/interpreter.py test <path|dir>
-       Runs test blocks (test "name": { ... }) found in the file(s). Each test runs in a fresh child 
-       environment so tests are isolated.
-
-    ► python chronos/interpreter.py build <path>
-       Type-check-only workflow (no execution). Useful for CI / demos where you want to validate 
-       signatures.
-
-**Important flags**
-
-● --permissive
-   Enables relaxed runtime and some permissive type-handling. Practically:
-
-     ► TypeChecker errors can be downgraded to warnings (if catch is implemented).
-
-     ► Runtime operations that would otherwise raise on type mismatch (e.g., string + int) may coerce 
-        or continue with a warning.
-
-     ► Recommended for demo/web-runner to avoid user-visible crashes.
-
-● --skip-typecheck
-   Skip static checking entirely. Use for fastest demo runs or to run intentionally untyped examples. 
-   Dangerous for complex programs—runtime errors may be less predictable.
-
-● --time-travel
-   After executing the prelude, enter the interactive time-travel REPL (CLI debugger) that allows 
-   forward N, back N, show name, history name, times, etc.
-
-● --dump-expanded
-   Print the AST / source after macro expansion. Helpful for debugging macros and to show what the 
-   compiler produced.
-
-
-
-Exit codes / outputs
-
-    ► Normal run returns 0 on success.
-
-    ► test returns non-zero when any test fails.
-
-    ► Uncaught runtime exceptions propagate to stderr (interpreter prints them); in automated callers 
-      (web runner) capture stdout/stderr and return them to the caller.
-
-
-
-
-
-##### 8. Web Runner (FastAPI) & Browser UI
-
-This documents server/app.py (or app.py) and the web/index.html browser UI you added. It summarizes 
-endpoints, data flows, safety considerations, and UX.
-
-**Server endpoints (the FastAPI app you provided)**
-
-● GET /
-Returns web/index.html if web exists, otherwise a small landing HTML.
-
-● GET /health
-Returns JSON status, python path, and whether chronos/interpreter.py exists.
-
-● POST /run
-   Accepts either JSON or multipart/form-data.
-
-    ► JSON payload shape: { "code": "...", "filename": "example.chronos", "flags": ["--permissive"] }
-
-    ► Form fields: code (text), filename (optional), flags (comma-separated string)
-
-    ► Server writes the code to a temporary .chronos file, runs: <python> chronos/interpreter.py run    
-      <tmpfile> [flags...], captures stdout/stderr, and returns JSON:
-
-      {
-        "returncode": 0 | null,
-        "stdout": "...",
-        "stderr": "...",
-        "timed_out": false | true,
-        "cmd": "<full command used>"
-      }
-
-
-    ► Temporary directory is removed after run.
-
-    ► A default timeout (e.g., 20s) is enforced to avoid runaway processes.
-
-● POST /upload
-   Accepts a .chronos file upload (file field) and optional flags. Behavior mirrors /run.
-
-● Static mounting: app.mount("/static", StaticFiles(directory="web", html=True), name="static") or      
-   serving web/ at /.
-
-**Browser UI (web/index.html)**
-
-● Editor textarea for inline code.
-
-● Filename input (default example.chronos).
-
-● Checkboxes for flags: permissive, skip-typecheck, infer, dump-expanded.
-
-● Buttons:
-
-    ► Run (paste): POSTs the code to /run and displays combined stdout/stderr/return code in the   
-      output  pane.
-
-    ► Upload & Run: posts a selected .chronos file via /upload.
-
-● Output pane shows:
-
-    ► [Timed out] marker if timed out
-
-    ► === STDOUT ===, === STDERR ===, === RETURN CODE ===
-
-**Server implementation notes (what your app.py does / expects)**
-
-● Uses the same Python executable (sys.executable) to run the interpreter; this helps avoid CI / venv 
-  mismatches.
-
-● Builds command as PYTHON CHRONOS_INTERPRETER run <path> [flags...], with CHRONOS_INTERPRETER resolved 
-  to chronos/interpreter.py.
-
-● Uses subprocess.run(..., capture_output=True, text=True, timeout=...).
-
-● Uses temporary directories for safety and cleans them up after the subprocess completes.
-
-● Returns a JSON object with stdout, stderr, returncode, timed_out, and optionally cmd for debugging.
-
-**Security & deployment cautions (critical)**
-
-● Executing user-supplied code on the server is dangerous. Your current setup runs arbitrary .chronos 
-  code using the same Python process. That code can:
-
-    ► Access filesystem (read/write)
-
-    ► Spawn arbitrary subprocesses
-
-    ► Consume CPU / memory
-
-● Mitigations you should consider for public hosting:
-
-    ► Run the interpreter inside a hardened sandbox (container, gVisor, Firecracker).
-
-    ► Enforce strict resource limits (CPU, memory, process count).
-
-    ► Drop network access for the child process unless explicitly needed.
-
-    ► Run in an isolated user account with minimal privileges.
-
-    ► Validate / sanitize uploaded filenames and contents.
-
-    ► Keep timeout conservative and return clear timeouts to users.
-
-● For local demos or offline MIT showcase, running on your laptop behind a firewall is fine. Do not 
-  publish the server without sandboxing.
-
-**UX suggestions (small, non-invasive)**
-
-● Keep permissive checkbox checked by default for demo playback to reduce crashes.
-
-● Hide advanced flags in the UI behind an “Advanced” panel; novices should only see permissive.
-
-● Show cmd and timed_out only in a collapsible “Debug” view.
-
-
-
-
-
-##### 9. Time-travel engine & debugger (internals & limitations)
-
-This section describes how ChronosLang’s time-travel system works internally, how the CLI/GUI debugger 
-manipulates time, and the important limitations (macros, reflection, concurrency, and precision). It 
-matches the exact behavior of the current implementation.
-
-### Data structures (as implemented)
-
-## TemporalVar
-
-A variable with a full history of its values over time.
-
-**Fields**
-
-● name
-
-● timeline (reference to global Timeline)
-
-● times — sorted list of timestamps
-
-● values — parallel list of values
-
-**Methods**
-
-● set_at(t, value)
-  Inserts or replaces the value at time t (uses bisect for sorted insertion).
-
-● value_at(t)
-  Returns the most recent value whose time ≤ t.
-
-● history()
-  Returns [(time, value), ...] pairs for GUI display.
-
-## Timeline
-
-**Fields**
-
-● current_time : float
-
-● _events : dict[time → list[(name, value)]]
-  Scheduled assignments waiting to be applied.
-
-● _sorted_times : list[float]
-  Sorted list of future event times.
-
-**Methods**
-
-● schedule(at_time, name, value)
-  Schedules a future assignment.
-
-● times()
-  Returns all scheduled times (GUI uses this to generate the slider max-value).
-
-● run_to(t, env)
-  Advances logical time:
-
-    ► Applies all events with time > current_time and time <= t, in order.
-
-    ► When applying an event:
-
-       ✦ If the variable already exists and is TemporalVar, call set_at.
-
-       ✦ If the variable exists but is not temporal, it is converted into a TemporalVar, preserving the 
-          old value at the current timeline time (usually 0 during prelude).
-
-       ✦ If the variable does not exist, create a TemporalVar with an initial value None at time 0, then 
-          set at event_time.
-
-    ► Applied events are removed from the scheduler, but their history remains inside the TemporalVar.
-
-    ► This makes timeline scrubbing possible without re-executing code.
-
-● step_forward(seconds, env)
-
-● step_backward(seconds)
-  Only rewinds the pointer (current_time).
-  It does not re-run or reverse code — history is read from TemporalVar.
-
-**GUI Mapping & Time Scrubbing**
-
-● The GUI computes the slider range from 0 to the maximum scheduled time plus tiny padding.
-
-● Slider resolution is fixed (e.g., 1000 steps); very fine-grained time steps may be visually merged.
-
-● When the slider moves:
-
-    ► Convert slider position → timeline time t
-
-    ► Call timeline.run_to(t, module_env)
-      (forward-only application of events; backward is pointer-only)
-
-    ► Display:
-
-       ✦ current value for each temporal variable (value_at(t))
-
-       ✦ full history (history())
-
-**Determinism & Reproducibility**
-
-● Scheduled events are applied strictly in increasing time order.
-
-● If multiple events share the same timestamp, they are applied in insertion order (the order schedule() 
-  was called during prelude).
-
-● For reproducible demos involving randomness, set a fixed RNG seed in the host process before running.
-
-**Important Limitations**
-
-● Macros are compile-time only
-
-    ► Macros expand before running the prelude or time-travel engine.
-
-    ► They do not create timeline events.
-
-    ► GUI cannot show macro expansion or “macro-level time.”
-
-● Reflection is runtime and context-sensitive
-
-    ► reflect shows:
-
-       ✦ module-level state in GUI prelude mode
-
-       ✦ full state (globals, locals, call frame) only during function execution in CLI mode.
-
-    ► The GUI cannot show reflection data that requires an active call frame.
-
-● Concurrency (go / goroutines) is real-time, not time-traveled
-
-    ► go spawns real Python threads immediately.
-
-    ► Thread side effects are not reversible:
-
-       ✦ They do not appear in the timeline.
-
-       ✦ They are not undone when you scrub time backwards.
-
-    ► Threads may mutate non-temporal global state in ways the GUI cannot track.
-
-Recommendation:
-
-For fully reversible demos, avoid goroutines in prelude code intended for time-travel.
-
-● Time-travel re-application model (critical to understand)
-
-ChronosLang uses a “single-application + persistent history” model:
-
-    ► Once an event is applied by run_to, it is removed from _events.
-
-    ► But the effect is stored permanently inside the TemporalVar history.
-
-    ► Rewinding does not re-run code or re-apply events — it only moves the pointer.
-
-    ► Moving forward again simply queries existing history (value_at) instead of re-running.
-
-This allows deterministic scrubbing without needing full reverse execution.
-
-● Background thread state during prelude
-
-    ► If the prelude spawns threads, their execution timing is nondeterministic.
-
-    ► GUI timeline becomes inaccurate because thread operations do not synchronize with scheduled events.
-
-Reliable demos should schedule with:
-
-x = value @ t+2s
-
-
-instead of relying on thread timing.
-
-● Precision & slider resolution
-
-    ► Slider has finite resolution (e.g., 1000 steps).
-
-    ► Extremely small deltas (1e-4 seconds) may be visually merged.
-
-    ► For predictable demos, use timestamps like t+0.1s, t+1.0s, etc.
-
-
-
-
-
-##### 10. Macros, macro expansion, and compile-time behavior
-
-**What macros are**
-
-Macros in ChronosLang are compile-time code transformers. They are written in ChronosLang itself using 
-macro definitions and are executed by the interpreter during the parse/expand phase — before any runtime 
-execution, scheduling, or timeline bookkeeping.
-
-Macro form:
-
-macro name(param1, param2):
-    <block>
-
-
-Example:
-
-macro log(expr):
-    print("🔍 [Macro Log] Value:", expr)
-
-**Expansion model (how your interpreter implements it)**
-
-● Collection (collect_macros)
-
-    ► The parser produces a tree. The interpreter scans top-level children and records macro_def nodes 
-      into self.macros as {"params": [...], "body": Tree} and removes those macro_def nodes from the AST.
-      Macros therefore do not appear in the runtime AST.
-
-● Top-level expansion (splicing) (macro_expand_top_level)
-
-    ► For each top-level expr_stmt whose expression is a func_call to a macro, the interpreter:
-
-         ✦ Copies the macro body (deep_copy_node).
-
-         ✦ Builds a mapping from macro parameters to call-site AST nodes.
-
-         ✦ Substitutes parameters into the copy (substitute_params_into_node), then splices the    
-            resulting statements into the top-level sequence (replacing the macro call).
-
-    ► This pass only splices at top-level; it avoids complex statement-list splicing inside nested 
-       contexts.
-
-● Expression-context expansion (expand_macros_recursive)
-
-    ► If a macro is used in an expression position and its body is a single expression statement, the 
-       interpreter attempts to expand it into a single expression in-place (so macros can behave like 
-       expression macros when appropriate).
-
-    ► If the macro body cannot be reduced to a single expression, the call is left unchanged (the 
-       top-level splicing pass handles it as needed).
-
-● Parameter substitution rules (substitute_params_into_node)
-
-    ► Replaces NAME tokens or (var NAME) nodes whose name matches a parameter with a deep-copied AST 
-    node from the call site.
-
-    ► Uses copy.deepcopy to avoid shared references and accidental mutation.
-
-**Key guarantees & limitations**
-
-● Macros are hygienic only to the extent of deep-copying AST nodes. There is no automatic 
-  alpha-renaming of introduced names; macro authors should avoid accidental name capture.
-
-● Macros are compile-time only. After expansion, macro definitions are removed and not available at 
-  runtime. Macro-generated statements are ordinary runtime code.
-
-● Splicing conservative design: macros that produce multiple statements are spliced only at top-level 
-  expression statements; expansion in nested statement lists is intentionally conservative to avoid 
-  complex AST manipulations.
-
-● Debugging macros: use --dump-expanded to print the AST after macro expansion for debugging or for 
-  recording what macros produced in demos.
-
-**Best practices for macro authors**
-
-● Define macros at the top of your file so collect_macros sees them before uses.
-
-● Keep macro bodies simple and ideally produce a single expression if you want them usable inline.
-
-● Avoid generating function-level or global names unless you deliberately want them; prefer macro 
-   parameters and local temporary names.
-
- Use --dump-expanded during development — it’s the canonical way to 
-   show macro-generated code.
-
-
-
-
-
-##### 11. Reflection API (runtime)
-
-ChronosLang exposes a runtime reflection API as the global reflect object and a small set of helper 
-functions available directly in the global environment. Reflection is designed for introspection, 
-debugging, and building self-aware demos — not for program invariants or security-critical logic.
-
-**Exposed objects & helpers**
-
-● reflect — an instance of Reflect(interpreter) with methods:
-
-    ► reflect.vars(env=None) → List[(name, value)]
-      Returns deduplicated (name, value) pairs from env (or global_env) walking parent chain. Useful to 
-      list available symbols.
-
-    ► reflect.functions(env=None) → List[(name, {params, param_types, return_type})]
-      Returns function objects present in the environment with signature info.
-
-    ► reflect.timeline() → {"current_time": float, "scheduled": List[float]}
-      Snapshot of current logical time and scheduled event times.
-
-    ► reflect.inspect(name, env=None) → dict with details:
-
-       ✦ If name is TemporalVar: {"found": True, "type": "TemporalVar", "history": [(t, v), ...]}
-
-       ✦ If name is Function: {"found": True, "type": "Function", "params": [...], ...}
-
-       ✦ Otherwise: {"found": True, "type": type_name, "value": repr(value)}
-
-       ✦ If not found: {"found": False, "error": "..."}.
-
-    ► reflect.macros() → List[str] (compile-time macro names collected earlier). Note: this is    
-      compile-time information exposed at runtime for debugging; macro bodies themselves are not 
-      runnable here.
-
-● Helper functions (also in global env):
-
-    ► reflect_type(value) → string like "int", "float", "string", "temporal", "function", "array", 
-      chan<...>, or Python type name fallback.
-
-    ► reflect_globals() → list of global variable names.
-
-    ► reflect_func_name() → name of currently executing function (or None) — useful inside a function to 
-      self-inspect.
-
-    ► reflect_locals() → shallow copy of locals for the currently executing function as a plain dict. 
-      Returns {} if not inside a function.
-
-**Typical usage examples**
-
-function show_state():
-    print("Globals:", reflect_globals())
-    print("Timeline:", reflect.timeline())
-    print("x inspect:", reflect.inspect("x"))
-
-show_state()
-
-
-Or inside a function:
-
-function foo():
-    a = 10
-    print("Currently in:", reflect_func_name())
-    print("Locals:", reflect_locals())
-
-foo()
-
-**Limitations & caveats**
-
-● reflect_locals() shows only the current function's locals and is meaningful only while that function   
-  is running. If the function returns, the callsite cannot later query those locals.
-
-● The time-travel GUI executes prelude nodes in a prepared module environment and then scrubs the 
-  timeline; reflection calls that depend on live call-stack context may not display the same as when run 
-  under python ... --time-travel (CLI).
-
-● Reflection can expose internal structures — avoid relying on it for security boundaries.
-
-● The reflect.macros() returns macro names seen at compile-time; macro bodies are not present in the 
-  runtime AST because macros are removed during compilation.
-
-
-
-
-
-##### 12. Probabilistic & ML modules
-
-ChronosLang contains two purpose-built modules for probabilistic programming (prob) and basic machine 
-learning (ml). Both are designed to be lightweight, easy to demo, and not to replace mature libraries. 
-They integrate with the interpreter's environment as normal objects bound into global_env.
-
-**prob module (ProbModule)**
-
-**Provided operations**
-
-● prob.uniform(a, b) → Uniform(a, b) distribution
-
-    ► Methods: .sample(rng), .logpdf(x)
-
-● prob.normal(mu, sigma) → Normal(mu, sigma) distribution
-
-    ► Methods: .sample(rng), .logpdf(x)
-
-● prob.bernoulli(p) → Bernoulli(p) distribution
-
-    ► Methods: .sample(rng), .logpmf(k)
-
-● prob.binomial(theta_ref, n=1, observed=None) → BinomialLikelihood(theta_ref, n, observed)
-
-    ► Use to represent an observed binomial count or likelihood term for inference.
-
-● prob.infer(param, observations, method="importance", nsamples=2000, **kwargs) → Posterior
-
-    ► method can be "importance" or "mh"/"mcmc"
-
-    ► importance_sampling(prior, likelihoods, nsamples, seed) returns Posterior(samples, weights) where:
-
-       ✦ Posterior.mean() returns weighted mean
-
-       ✦ Posterior.credible_interval(alpha) returns (lo, hi)
-
-**Example**
-
-theta = prob.uniform(0.0, 1.0)
-obs = prob.binomial(theta, 10, 7)
-posterior = prob.infer(theta, [obs], "importance", 5000)
-print("post mean:", posterior.mean())
-print("95% CI:", posterior.credible_interval(0.05))
-
-
-**Implementation & notes**
-
-● importance_sampling uses log-weights then normalizes; numerical underflow falls back to uniform 
-  weights.
-
-● metropolis_hastings is provided as mh/mcmc option.
-
-● For reproducibility, pass a seed when testing or recording demos.
-
-**Best practices**
-
-● For short demos, importance is simple and effective; MCMC is slower but useful for more realistic 
-  posterior shapes.
-
-● Avoid extremely peaked priors or likelihoods without increasing nsamples.
-
-● Use small, clear toy examples when demonstrating (coin flips, simple binomial).
-
-
-
-**ml module (MLModule)**
-
-**Purpose**
-
-● Provide a minimal tensor API with optional PyTorch backend. If PyTorch (torch) is importable, ml 
-exposes torch tensors and training using autodiff; otherwise, it falls back to NumPy wrappers for 
-deterministic demos.
-
-**Exposed API**
-
-● ml.tensor(obj) → if torch available: torch.tensor(obj, dtype=float32) with requires_grad=True; 
-otherwise returns NumpyTensor(obj).
-
-● ml.to_numpy(tensor_like) → returns NumPy array for extraction.
-
-● ml.matmul(a, b) → matrix multiply (torch or NumPy).
-
-● ml.add(a, b) → elementwise addition.
-
-● ml.sum(a, axis=None), ml.mean(a, axis=None) → aggregation helpers.
-
-● ml.mse_loss(preds, targets) → returns MSE (torch reduces to tensor; fallback to float).
-
-● ml.linear_regression_train(X, y, epochs=1000, lr=0.01) → training helper:
-
-    ► If torch available:
-
-       ✦ Performs SGD with autodiff on parameters w and b, returns (w_np, b_np) as NumPy arrays / float.
-
-    ► Else:
-
-       ✦ Returns closed-form least-squares solution via normal equations (or lstsq fallback): 
-         (w_np, b_np).
-
-    ► Input X, y may be tensor(...) or NumPy arrays/wrappers.
-
-**Example**
-
-X = tensor([[1.0], [2.0], [3.0], [4.0], [5.0]])
-y = tensor([[3.0], [5.0], [7.0], [9.0], [11.0]])
-
-w, b = ml.linear_regression_train(X, y, 500, 0.05)
-print("w:", w, "b:", b)
-
-
-**Implementation details & caveats**
-
-● The NumpyTensor wrapper provides .numpy() and .shape() and a simple __repr__.
-
-● linear_regression_train handles scalar/vector shapes: converts X to 2D if 1-D input, appends bias 
-  column in normal equations.
-
-● Torch path returns detached NumPy arrays (w_np) after training; torch tensors are temporary on the 
-  training path.
-
-● ml helpers attempt to detect tensor types by duck-typing (hasattr(..., "tolist"), instance checks).
-
-
-**Integration between modules, temporal engine, and macros**
-
-● prob and ml objects are bound into global_env at interpreter construction (self.global_env.set
-   ("prob", _prob_instance) and self.global_env.set("ml", _ml_instance)).
-
-● They are accessible from Chronos code as ordinary globals and can be combined with temporal variables 
-  and functions.
-
-● Avoid performing heavy inference/training inside preludes you plan to time-travel through in the GUI — 
-  long-running background computations are not reversed by the timeline and may lead to confusing demos.
-
-**Testing & reproducibility tips for probabilistic / ML demos**
-
-● Add a seed parameter and print it (or set RNG via numpy.random.default_rng(seed) inside the demo) so 
-  results are reproducible for recorded videos.
-
-● For prob.infer(..., method="importance", nsamples=5000), test runs locally before recording to ensure 
-  timing and numeric stability.
-
-● Show small summaries (mean and CI) instead of raw large sample arrays in UI outputs.
-
-
-
-
-
-##### 13. Interactive Examples
-
-ChronosLang provides a curated set of runnable examples demonstrating every major feature of the 
-language.
-Each example includes a terminal screenshot showing the real output produced by the interpreter.
-
-All screenshots follow the naming pattern:
-
-docs/screenshots/<example>.png
-
-
-## 13.1 Basic Functions & Arithmetic
-
-File: examples/hello.chronos
-
-Demonstrates function definition, return values, and basic printing.
-
-✔ Concepts: functions, arithmetic, print()
-
-**Screenshot:**
-![hello.chronos output](docs/screenshots/hello.chronos_output.png)
-
-
-
-## 13.2 Static Type System & Inference
-
-File: examples/type_system.chronos
-
-Tests the built-in typechecker:
-
-● explicit types (a: int)
-
-● inferred types (auto_add(a, b))
-
-● correct usage under strict mode
-
-● permissive mode behavior (--permissive)
-
-type errors and error reporting
-
-✔ Concepts: type annotations, inference, permissive mode, error messages
-
-**Screenshots:**
-
-● Static Mode:
-![type_system static mode output](docs/screenshots/type_system_chronos_static_mode_output.png)
-
-● Permissive Mode:
-![type_system permissive mode output](docs/screenshots/type_system_chronos_permissive_mode_output.png)
-
-
-
-## 13.3 Concurrency — Goroutines & Rendezvous Channels
-
-File: examples/producer_consumer.chronos
-
-Demonstrates:
-
-● go lightweight threads
-
-● make(chan) rendezvous channels
-
-● synchronous send/receive (ch <- v, <- ch)
-
-✔ Concepts: concurrency primitives, channel communication
-
-**Screenshot:**
-![producer_consumer output](docs/screenshots/producer_consumer.chronos_output.png)
-
-
-
-## 13.4 Unit Tests & the Package System
-
-File: examples/tests_and_packages.chronos
-
-Shows the language’s built-in test runner:
-
-● test "<name>":
-
-● assert statements
-
-● mixing code + tests in one file
-
-● running via chronos test examples/
-
-✔ Concepts: testing, organization, packages
-
-**Screenshot:**
-![tests and packages output](docs/screenshots/tests_and_packages.chronos_output.png)
-
-
-
-## 13.5 Temporal Variables
-
-File: examples/temporal_demo.chronos
-
-ChronosLang’s most unique feature:
-
-● temporal x = ...
-
-● scheduled writes (x = 5 @ t+2s)
-
-● forward/backward time navigation
-
-● full timeline reconstruction
-
-✔ Concepts: temporal variables, scheduled time, temporal semantics
-
-**Screenshot:**
-![temporal_demo output](docs/screenshots/temporal_demo.chronos_output.png)
-
-
-
-## 13.6 Probabilistic Programming — Bayesian Coin Flip
-
-File: examples/prob_coin.chronos
-
-Demonstrates the probabilistic engine:
-
-● prob.uniform, prob.binomial
-
-● inference through prob.infer(...)
-
-● posterior mean
-
-● credible intervals
-
-✔ Concepts: distributions, sampling, Bayesian inference
-
-**Screenshot:**
-![prob_coin output](docs/screenshots/prob_coin.chronos_output.png)
-
-
-
-## 13.7 Machine Learning — Linear Regression with Autodiff
-
-File: examples/tensor_linear_regression.chronos
-
-Built on the ML backend:
-
-● tensors
-
-● matrix multiplication
-
-● autodiff updates
-
-● training loop
-
-✔ Concepts: tensors, autodiff, ML training
-
-**Screenshot:**
-![tensor_linear_regression output](docs/screenshots/tensor_linear_regression.chronos_output.png)
-
-
-
-## 13.8 Macros & Reflection
-
-File: examples/macros_reflection.chronos
-
-Features:
-
-● compile-time macros
-
-● macro expansion logging
-
-● runtime reflection 
-
-● introspection utilities
-
-✔ Concepts: compile-time evaluation, AST, runtime introspection
-
-⚠ Time-travel debugger does not track macro-expanded values.
-
-**Screenshot:**
-![macros_reflection output](docs/screenshots/macros_reflection.chronos_output.png)
-
-
-
-
-
-##### 14. Error messages, debugging tips
-
-This section collects concrete, high-value troubleshooting advice you’ll reuse constantly while 
-developing and demoing ChronosLang — covering parser/runtime errors, type system issues, macro expansion 
-confusion, timeline problems, and GUI/Web failures.
-It is designed so that any reviewer, professor, evaluator, or developer can quickly recover from 
-mistakes and understand why Chronos behaves the way it does.
-
-
-**Common Errors, Explanations, and Fixes**
-
-Lark / Parse Errors
-
-Symptom:
-lark.exceptions.UnexpectedInput or “Failed to parse” with line/column.
-
-Fix:
-
-● Check indentation and trailing colons on headers (function, macro, test, etc.).
-
-● Convert tabs → spaces.
-
-● If stuck, print the preprocessed source:
-
-  preprocess_indent(src)
-
-This shows how Chronos transforms indentation into {} blocks.
-
-**NameError: Name 'x' is not defined**
-
-Symptom:
-
-env.get() fails during execution.
-
-Fix:
-
-● Ensure variable/function is defined before use.
-
-● For temporal variables:
-
-    ► Must be declared using
-       temporal x = <expr>
-
-    ► Or created implicitly when a scheduled event is first applied (Timeline may create TemporalVar for a
-       missing name at apply-time).
-
-● If you want x to have a readable value at t=0, declare it first (e.g., temporal x = 0) before reading it.
-
-**TypeError (arithmetic, function calls, tensor ops)**
-
-Symptom:
-
-Messages like:
-“expected type X, got Y” or runtime type mismatch.
-
-Fix:
-
-● For demos:
-
---permissive
-
-
-● Add param type annotations where needed.
-
-● Use ml.tensor(...) if doing tensor ops.
-
-● For strict correctness testing, run with typechecker enabled.
-
-**Macro-related Confusion**
-
-Symptom:
-
-Macros disappear in GUI timeline, or reflect output seems inconsistent.
-
-Reason:
-Macros run at compile-time and do not exist as runtime nodes.
-
-Fix:
-
-● Use:
-
---dump-expanded
-
-
-to view expanded AST.
-
-● Keep macros at top of file.
-
-● Avoid accidental name capture inside macros (macros do not automatically alpha-rename introduced names).
-
-
-**Time-Travel / Timeline Issues**
-
-# Temporal Variables (temporal x, y, etc.)
-
-Symptom:
-Values at different logical times don’t match expectations or overwrite each other.
-
-Reason:
-
-● Temporal variables track state over logical time but don’t snapshot automatically.
-
-● Reusing the same variable name can cause historical states to collide at the same timestamp.
-
-Fix:
-
-● Always assign unique temporal variable names when needed.
-
-● Check reflect() or value_at(t) to inspect historical values.
-
-
-# Time-Travel Debugger (GUI)
-
-Symptom:
-
-Stepping forward/backward shows unexpected values, or events appear skipped.
-
-Reason:
-
-● The debugger reads from the timeline; backward movement only moves the pointer and reads history.
-
-● Missing events usually mean nothing was scheduled at that time or the slider resolution is too coarse.
-
-Fix:
-
-● Schedule updates at clear times for reliable scrubbing (e.g., t+0.5s, t+2s, t+5s).
-
-● Inspect scheduled times to see what the Timeline will apply.
-
-● Treat the debugger as a read-only observer; only advancing time applies scheduled events.
-
-Quick Debug Tips
-
-● Slider / Combo → Scrub or jump to specific time points.
-
-● Variable List → Shows temporal vs normal variables.
-
-● Variable Detail → Displays current value and full history.
-
-● Play / Pause → Step automatically in small increments (e.g., 0.2s per tick).
-
-● Step Forward/Back → Increment or decrement timeline manually. (Back reads history; it does not undo I/O.)
-
-
-**Concurrency / Channel Deadlock**
-
-Symptom:
-
-Program hangs.
-
-Fix:
-
-● Check that every send has a matching recv.
-
-● If using go, ensure worker contains both operations.
-
-● Add debug prints to see where execution stops.
-
-● Prefer simple patterns for demos (one worker + main).
-
-
-**FastAPI / Uvicorn Import Errors**
-
-Symptom:
-
-“Could not import module ‘app’” or import crash when starting server.
-
-Fix:
-
-Ensure correct module path:
-
-● uvicorn server.app:app --reload
-
-● “Run from repo root.”
-
-✔ This is true.
-Uvicorn resolves modules relative to the folder where you run the command.
-
-If you run inside server/, this will fail:
-
-uvicorn server.app:app
-
-
-But if you run from the root, it succeeds.
-
-● “Check PYTHONPATH.”
-
-✔ True.
-If your project structure is non-standard or VS Code is using a different working directory, Python may not find the modules.
-
-● “Detect import failures” snippet
-
-import importlib, traceback
-try:
-    importlib.import_module("server.app")
-    print("OK")
-except Exception:
-    traceback.print_exc()
-
-
-**PowerShell (Windows) Errors**
-
-Symptom:
-Unix-style heredocs fail, e.g.
-python - <<'PY'.
-
-Fix:
-
-PowerShell does NOT support POSIX heredocs.
-
-Use:
-
-python -c "print('...')"
-
-
-or a temporary file.
-
-
-**ML / Optional Dependencies (torch, PyQt5)**
-
-Symptom:
-
-ModuleNotFoundError: No module named 'torch'
-or
-No module named PyQt5.
-
-Fix:
-
-Install only for demos that need them:
-
-pip install torch
-pip install PyQt5
-
-
-For record-this-machine demos, verify versions > do not change machines last-minute.
-
-
-**Debugging Techniques & Commands**
-
-Show macro expansions
-python chronos/interpreter.py run examples/macros_reflection.chronos --dump-expanded
-
-Permissive mode
-python chronos/interpreter.py run examples/type_system.chronos --permissive
-
-Run tests
-python chronos/interpreter.py test examples 
-
-**Inspect timeline**
-
-Add in the prelude:
-
-   print(reflect.timeline())
-
-**Debug logging**
-
-Use environment variable:
-
-if os.environ.get("CHRONOS_DEBUG"):
-    print("EXEC:", node.data)
-
-Web runner debugging
-
-Log subprocess command and stdout/stderr inside app.py.
+### Web runner issues
+- Run `uvicorn server.app:app --reload` from the repo root.
+- Treat public deployment as unsafe unless you sandbox code execution.
